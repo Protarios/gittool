@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "protarios-gittool"
-version = "0.1.0"
-description = "Tkinter GUI for gittyup repository status checks and safe pulls"
+version = "0.2.0"
+description = "Modern GTK4/libadwaita GUI for gittyup repository status and safe pulls"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [

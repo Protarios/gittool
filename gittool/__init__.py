@@ -1,3 +1,3 @@
-"""GitTool – Desktop GUI for managing local Git repositories."""
+"""GitTool – GTK 4/libadwaita desktop application."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
