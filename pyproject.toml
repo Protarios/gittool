@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "protarios-gittool"
+version = "0.1.0"
+description = "Tkinter GUI for gittyup repository status checks and safe pulls"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "gittyup>=1.2.0,<2",
+    "platformdirs>=4.5",
+]
+
+[project.gui-scripts]
+gittool = "gittool.app:main"
+
+[tool.setuptools.packages.find]
+include = ["gittool*"]
