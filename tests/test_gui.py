@@ -28,7 +28,7 @@ class QtGuiTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         # Never pick up or modify real user configuration during tests.
-        with patch("gittool.app.load_repositories", return_value=[]):
+        with patch("gittool.app.load_repository_entries", return_value=[]):
             self.window = GitToolWindow()
         self.path = Path(self.tmp.name).resolve()
 
@@ -90,6 +90,25 @@ class QtGuiTests(unittest.TestCase):
         self.window._on_error(self.path, "Simulierter Fehler")
         self.assertIn("Fehler", item.text(6))
         self.assertIn("1 blockiert", self.window.summary.text())
+
+
+    def test_submodule_groups_and_move_controls(self) -> None:
+        parent = self.path
+        sibling = self.path.parent / "another"
+        child = parent / "modules" / "inner"
+        with patch("gittool.app.discover_submodules", return_value=[(child, parent)]):
+            self.assertTrue(self.window._register_repository(parent, persist=False))
+        with patch("gittool.app.discover_submodules", return_value=[]):
+            self.assertTrue(self.window._register_repository(sibling, persist=False))
+        self.assertEqual(self.window.repositories, [parent, child, sibling])
+        self.assertEqual(self.window.items[str(parent)].childCount(), 1)
+        self.assertEqual(self.window.items[str(child)].parent(), self.window.items[str(parent)])
+        item = self.window.items[str(parent)]
+        item.setSelected(True)
+        with patch("gittool.app.save_repository_entries"):
+            self.window._move_selected(+1)
+        self.assertEqual(self.window.repositories, [sibling, parent, child])
+        self.assertEqual(self.window.catalog.find(child).parent, parent)
 
     def test_visual_status_categories(self) -> None:
         expectations = {
