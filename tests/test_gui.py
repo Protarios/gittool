@@ -10,7 +10,8 @@ from unittest.mock import patch
 # Rendering a native window is unnecessary for the automated GUI smoke test.
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import Qt  # noqa: E402
+from PySide6.QtCore import QCoreApplication, QEvent, Qt  # noqa: E402
+import shiboken6  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from gittool.app import GitToolWindow  # noqa: E402
@@ -29,8 +30,20 @@ class QtGuiTests(unittest.TestCase):
         # Never pick up or modify real user configuration during tests.
         with patch("gittool.app.load_repositories", return_value=[]):
             self.window = GitToolWindow()
-        self.addCleanup(self.window.close)
         self.path = Path(self.tmp.name).resolve()
+
+    def tearDown(self) -> None:
+        self.window.close()
+        shiboken6.delete(self.window)
+        self.window = None
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.qt_app.quit()
+        cls.qt_app.processEvents()
+        shiboken6.delete(cls.qt_app)
+        cls.qt_app = None
 
     def test_window_creation_and_actions(self) -> None:
         self.assertIn("GitTool", self.window.windowTitle())
