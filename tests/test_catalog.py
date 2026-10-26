@@ -30,7 +30,7 @@ class CatalogTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.home = Path(self.tmp.name)
+        self.home = Path(self.tmp.name).resolve()
         self.a = self.home / "repo-a"
         self.b = self.home / "repo-b"
         self.c = self.home / "repo-c"
