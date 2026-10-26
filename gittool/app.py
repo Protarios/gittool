@@ -13,12 +13,18 @@ try:
     gi.require_version("Adw", "1")
     from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango
 except (ImportError, ValueError) as exc:
+    # Preserve the real import failure; the older generic message wrongly
+    # implied missing GTK OS packages when only the venv hid PyGObject.
     raise SystemExit(
-        "GTK 4 / libadwaita / PyGObject fehlen.\n"
-        "Arch: sudo pacman -S python-gobject gtk4 libadwaita\n"
-        "Debian/Ubuntu: sudo apt install python3-gi gir1.2-gtk-4.0 gir1.2-adw-1\n"
-        "Wichtig: Die virtuelle Python-Umgebung muss 'gi' sehen. "
-        "Siehe Installationshinweise in README.md."
+        f"GTK-Bindings konnten nicht geladen werden: {type(exc).__name__}: {exc}\n"
+        f"Python: {sys.executable}\n\n"
+        "Auf Arch/CachyOS: sudo pacman -S --needed python-gobject gtk4 libadwaita\n"
+        "Falls diese Pakete bereits installiert sind und du eine .venv nutzt,\n"
+        "prüfe in .venv/pyvenv.cfg die Einstellung:\n"
+        "    include-system-site-packages = true\n"
+        "Danach erneut starten. PyGObject muss mit deiner Python-Version kompatibel sein.\n"
+        "Prüfung: python -c 'import gi; from gi.repository import Gtk, Adw'\n"
+        "Details: README.md"
     ) from exc
 
 from .backend import (
