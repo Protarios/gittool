@@ -408,35 +408,39 @@ class GitToolWindow(QMainWindow):
         selected = self._selected_paths()
         if not selected:
             return
+        removed: list[Path] = []
         for path in selected:
-            key = str(path)
-            item = self.items.pop(key)
-            index = self.tree.indexOfTopLevelItem(item)
-            if index >= 0:
-                self.tree.takeTopLevelItem(index)
-            self.states.pop(key, None)
-            self.errors.pop(key, None)
-        selected_set = set(selected)
-        self.repositories = [p for p in self.repositories if p not in selected_set]
+            removed.extend(self.catalog.remove(path))
+        if not removed:
+            return
+        for path in removed:
+            self.states.pop(str(path), None)
+            self.errors.pop(str(path), None)
+        self._rebuild_tree()
         self._save()
-        self._log(f"{len(selected)} Repository(s) aus der Liste entfernt (keine Dateien gelöscht).")
-        self._update_summary()
-        self._refresh_buttons()
+        self._log(f"{len(removed)} Repository(s) aus der Liste entfernt (keine Dateien gelöscht).")
 
     def _load_saved(self) -> None:
         try:
-            paths = load_repositories()
+            entries = load_repository_entries()
         except (OSError, ValueError) as exc:
             self._log(f"FEHLER beim Lesen von {default_config_path()}: {exc}")
-            QMessageBox.warning(self, "Konfiguration", f"Repositories konnten nicht geladen werden:\n{exc}")
+            QMessageBox.warning(self, "Konfiguration",
+                                f"Repositories konnten nicht geladen werden:\n{exc}")
             return
-        for path in paths:
-            self._register_repository(path, persist=False)
+        for entry in entries:
+            self._register_repository(entry.path, parent=entry.parent,
+                                      persist=False, discover=False)
+        roots = [entry.path for entry in self.catalog.entries if entry.parent is None]
+        for root in roots:
+            self._register_repository(root, persist=False, discover=True)
+        if self.catalog.entries != entries:
+            self._save()
         self._log(f"{len(self.repositories)} Repository(s) aus der Konfiguration geladen.")
 
     def _save(self) -> None:
         try:
-            save_repositories(self.repositories)
+            save_repository_entries(self.catalog.entries)
         except OSError as exc:
             self._log(f"FEHLER beim Speichern: {exc}")
             QMessageBox.warning(self, "Konfiguration", str(exc))
