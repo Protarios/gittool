@@ -140,7 +140,7 @@ class GitToolApp(tk.Tk):
             )
             return
         for path in paths:
-            self._register(path, persist=False)
+            self._add_repository(path, persist=False)
         self._update_summary()
         self._write_log(f"{len(self.repositories)} Repository(s) geladen.")
 
@@ -151,7 +151,7 @@ class GitToolApp(tk.Tk):
             messagebox.showerror("Speichern fehlgeschlagen", str(exc))
             self._write_log(f"Konfiguration konnte nicht gespeichert werden: {exc}")
 
-    def _register(self, path: Path, *, persist: bool = True) -> bool:
+    def _add_repository(self, path: Path, *, persist: bool = True) -> bool:
         path = path.expanduser().resolve()
         key = os.path.normcase(str(path))
         if any(os.path.normcase(str(p)) == key for p in self.repositories):
@@ -176,7 +176,7 @@ class GitToolApp(tk.Tk):
         except (GitToolError, OSError) as exc:
             messagebox.showerror("Kein Repository", str(exc))
             return
-        if self._register(path):
+        if self._add_repository(path):
             self._write_log(f"Hinzugefügt: {path}")
         self.path_var.set("")
 
@@ -285,7 +285,7 @@ class GitToolApp(tk.Tk):
                     self._advance()
                 elif kind == "scan":
                     found: list[Path] = event[1]
-                    count = sum(self._register(path, persist=False) for path in found)
+                    count = sum(self._add_repository(path, persist=False) for path in found)
                     if count:
                         self._persist()
                     self._write_log(f"Suche abgeschlossen: {len(found)} gefunden, {count} neu hinzugefügt.")
