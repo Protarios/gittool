@@ -28,10 +28,11 @@ except (ImportError, ValueError) as exc:
     ) from exc
 
 from .backend import (
-    GitToolError, PullOutcome, RepositoryState, discover_repositories,
+    GitToolError, PullOutcome, RepositoryState, discover_repositories, discover_submodules,
     inspect_repository, normalize_repository, pull_repository,
 )
-from .config import default_config_path, load_repositories, save_repositories
+from .config import default_config_path, load_repository_entries, save_repository_entries
+from .repository_catalog import RepositoryCatalog
 from .status_style import visual_status
 
 
@@ -65,6 +66,7 @@ class GitToolApp(Adw.Application):
 
     def __init__(self) -> None:
         super().__init__(application_id="io.github.protarios.gittool")
+        self.catalog = RepositoryCatalog()
         self.repositories: list[Path] = []
         self.states: dict[str, RepositoryState] = {}
         self.errors: dict[str, str] = {}
@@ -170,6 +172,14 @@ class GitToolApp(Adw.Application):
         self.select_button.connect("clicked", lambda *_: self._toggle_selection())
         options.append(self.select_button)
         self.buttons.append(self.select_button)
+        self.move_up = Gtk.Button(label="↑ Nach oben")
+        self.move_up.connect("clicked", lambda *_: self._move_selected(-1))
+        options.append(self.move_up)
+        self.buttons.append(self.move_up)
+        self.move_down = Gtk.Button(label="↓ Nach unten")
+        self.move_down.connect("clicked", lambda *_: self._move_selected(1))
+        options.append(self.move_down)
+        self.buttons.append(self.move_down)
         body.append(options)
 
         legend = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=14)
