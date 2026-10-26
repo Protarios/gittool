@@ -1,30 +1,29 @@
-"""GTK4 + libadwaita desktop UI. Git operations never run in the GTK main loop."""
+"""Modern Qt 6 frontend for Windows and Linux, using Python gittyup.
+
+The repository configuration and Git backend are shared with the GTK branch.
+Only the GUI thread touches Qt widgets; worker results use queued Qt signals.
+"""
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
-from pathlib import Path
 import os
+from pathlib import Path
 import sys
 
 try:
-    import gi
-    gi.require_version("Gtk", "4.0")
-    gi.require_version("Adw", "1")
-    from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango
-except (ImportError, ValueError) as exc:
-    # Preserve the real import failure; the older generic message wrongly
-    # implied missing GTK OS packages when only the venv hid PyGObject.
+    from PySide6.QtCore import QObject, Qt, Signal
+    from PySide6.QtGui import QBrush, QColor, QFont
+    from PySide6.QtWidgets import (
+        QAbstractItemView, QApplication, QFileDialog, QFrame, QHBoxLayout,
+        QHeaderView, QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit,
+        QProgressBar, QPushButton, QSplitter, QTreeWidget, QTreeWidgetItem,
+        QVBoxLayout, QWidget,
+    )
+except ImportError as exc:
     raise SystemExit(
-        f"GTK-Bindings konnten nicht geladen werden: {type(exc).__name__}: {exc}\n"
-        f"Python: {sys.executable}\n\n"
-        "Auf Arch/CachyOS: sudo pacman -S --needed python-gobject gtk4 libadwaita\n"
-        "Falls diese Pakete bereits installiert sind und du eine .venv nutzt,\n"
-        "prüfe in .venv/pyvenv.cfg die Einstellung:\n"
-        "    include-system-site-packages = true\n"
-        "Danach erneut starten. PyGObject muss mit deiner Python-Version kompatibel sein.\n"
-        "Prüfung: python -c 'import gi; from gi.repository import Gtk, Adw'\n"
-        "Details: README.md"
+        f"PySide6 konnte nicht geladen werden: {exc}\n"
+        "Bitte im aktiven Python-Environment 'python -m pip install -e .' ausführen."
     ) from exc
 
 from .backend import (
@@ -35,501 +34,477 @@ from .config import default_config_path, load_repositories, save_repositories
 from .status_style import visual_status
 
 
-CSS = """
-.repo-indicator { min-width: 5px; min-height: 34px; border-radius: 6px; }
-.indicator-ok { background: @success_color; }
-.indicator-info { background: @accent_color; }
-.indicator-warn { background: @warning_color; }
-.indicator-error { background: @error_color; }
-.indicator-muted { background: @insensitive_fg_color; }
-.status-pill {
-    border-radius: 999px;
-    padding: 5px 12px;
-    font-weight: 700;
-    font-size: 0.88em;
-    min-width: 95px;
-}
-.pill-ok { color: @success_color; background: alpha(@success_color, .13); }
-.pill-info { color: @accent_color; background: alpha(@accent_color, .13); }
-.pill-warn { color: @warning_color; background: alpha(@warning_color, .15); }
-.pill-error { color: @error_color; background: alpha(@error_color, .13); }
-.pill-muted { color: @insensitive_fg_color; background: alpha(@insensitive_fg_color, .10); }
-.git-details { font-size: 0.89em; }
-.repo-list { border-radius: 12px; }
-.section-label { font-weight: 700; }
-"""
+COLUMNS = (
+    "Repository", "Branch", "Upstream", "Dateien", "Ahead ↑",
+    "Behind ↓", "Status", "Lokaler Pfad",
+)
+STATUS_COLUMN = 6
+PATH_COLUMN = 7
 
 
-class GitToolApp(Adw.Application):
-    """One application/window; all GTK calls remain on the main thread."""
+class WorkerEvents(QObject):
+    """Qt automatically dispatches cross-thread signals to the GUI thread."""
 
+    state = Signal(object)
+    outcome = Signal(object)
+    error = Signal(object, str)
+    scan = Signal(object)
+    finished = Signal()
+
+
+class GitToolWindow(QMainWindow):
     def __init__(self) -> None:
-        super().__init__(application_id="io.github.protarios.gittool")
+        super().__init__()
         self.repositories: list[Path] = []
         self.states: dict[str, RepositoryState] = {}
         self.errors: dict[str, str] = {}
-        self.widgets: dict[str, tuple] = {}
-        self.row_paths: dict[str, str] = {}
-        self.next_row_id = 0
+        self.items: dict[str, QTreeWidgetItem] = {}
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="gittool")
+        self.events = WorkerEvents(self)
+        self.events.state.connect(self._on_state)
+        self.events.outcome.connect(self._on_outcome)
+        self.events.error.connect(self._on_error)
+        self.events.scan.connect(self._on_scan)
+        self.events.finished.connect(self._on_finished)
         self.busy = False
-        self.closing = False
-        self.buttons: list[Gtk.Button] = []
-        self.window: Adw.ApplicationWindow | None = None
-        self.processed = 0
+        self.completed = 0
         self.total = 0
+        self.buttons: list[QPushButton] = []
 
-    def do_activate(self) -> None:
-        if self.window is not None:
-            self.window.present()
-            return
-
-        display = Gdk.Display.get_default()
-        if display is not None:
-            provider = Gtk.CssProvider()
-            provider.load_from_data(CSS.encode("utf-8"))
-            Gtk.StyleContext.add_provider_for_display(
-                display, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
-            )
-
-        self.window = Adw.ApplicationWindow(application=self)
-        self.window.set_title("GitTool")
-        self.window.set_default_size(1160, 760)
-        self.window.connect("close-request", self._on_close_request)
-
-        self.toasts = Adw.ToastOverlay()
-        self.window.set_content(self.toasts)
-        main = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        self.toasts.set_child(main)
-
-        bar = Adw.HeaderBar()
-        bar.set_title_widget(Adw.WindowTitle.new("GitTool", "Repository-Status und sicherer Pull"))
-        main.append(bar)
-
-        add_button = Gtk.Button(icon_name="list-add-symbolic", tooltip_text="Git-Repository hinzufügen")
-        add_button.connect("clicked", lambda *_: self._choose_folder(scan=False))
-        bar.pack_start(add_button)
-        scan_button = Gtk.Button(icon_name="folder-saved-search-symbolic",
-                                 tooltip_text="Verzeichnisbaum nach Repositories durchsuchen")
-        scan_button.connect("clicked", lambda *_: self._choose_folder(scan=True))
-        bar.pack_start(scan_button)
-        self.buttons.extend([add_button, scan_button])
-
-        self.all_check = Gtk.Button(label="Alle prüfen")
-        self.all_check.connect("clicked", lambda *_: self._start("check", self.repositories[:]))
-        bar.pack_end(self.all_check)
-        self.buttons.append(self.all_check)
-
-        self.all_pull = Gtk.Button(label="Alle prüfen + Pull")
-        self.all_pull.add_css_class("suggested-action")
-        self.all_pull.connect("clicked", lambda *_: self._start("pull", self.repositories[:]))
-        bar.pack_end(self.all_pull)
-        self.buttons.append(self.all_pull)
-
-        body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
-        body.set_margin_top(16)
-        body.set_margin_bottom(14)
-        body.set_margin_start(20)
-        body.set_margin_end(20)
-        main.append(body)
-
-        intro = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        intro.set_valign(Gtk.Align.CENTER)
-        self.summary = Gtk.Label(label="0 Repositories", xalign=0)
-        self.summary.add_css_class("title-3")
-        self.summary.set_hexpand(True)
-        intro.append(self.summary)
-        self.search = Gtk.SearchEntry(placeholder_text="Repository, Pfad oder Status suchen")
-        self.search.set_width_chars(31)
-        self.search.connect("search-changed", lambda *_: self.listbox.invalidate_filter())
-        intro.append(self.search)
-        body.append(intro)
-
-        pathline = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        self.path_entry = Gtk.Entry(placeholder_text="Lokalen Repository-Pfad eingeben …")
-        self.path_entry.set_hexpand(True)
-        self.path_entry.connect("activate", lambda *_: self._add_entered_path())
-        pathline.append(self.path_entry)
-        path_button = Gtk.Button(label="Pfad hinzufügen")
-        path_button.connect("clicked", lambda *_: self._add_entered_path())
-        self.buttons.append(path_button)
-        pathline.append(path_button)
-        body.append(pathline)
-
-        options = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        for label, callback in (
-            ("Auswahl prüfen", lambda: self._start("check", self._selected_paths())),
-            ("Auswahl: prüfen + Pull", lambda: self._start("pull", self._selected_paths())),
-            ("Auswahl entfernen", self._remove_selected),
-        ):
-            button = Gtk.Button(label=label)
-            button.connect("clicked", lambda _b, run=callback: run())
-            options.append(button)
-            self.buttons.append(button)
-        self.select_button = Gtk.Button(label="Alle auswählen")
-        self.select_button.connect("clicked", lambda *_: self._toggle_selection())
-        options.append(self.select_button)
-        self.buttons.append(self.select_button)
-        body.append(options)
-
-        legend = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=14)
-        for status in ("Aktuell", "Pull möglich", "Lokale Änderungen", "Divergiert"):
-            title, css, icon = visual_status(status)
-            dot = Gtk.Image.new_from_icon_name(icon)
-            dot.add_css_class("pill-" + css)
-            legend.append(dot)
-            caption = Gtk.Label(label=title)
-            caption.add_css_class("dim-label")
-            legend.append(caption)
-        body.append(legend)
-
-        scroll = Gtk.ScrolledWindow()
-        scroll.set_hexpand(True)
-        scroll.set_vexpand(True)
-        scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-        self.listbox = Gtk.ListBox()
-        self.listbox.add_css_class("boxed-list")
-        self.listbox.add_css_class("repo-list")
-        self.listbox.set_selection_mode(Gtk.SelectionMode.NONE)
-        self.listbox.set_filter_func(self._filter_row)
-        empty = Adw.StatusPage(
-            title="Noch keine Repositories",
-            description="Über „+“ einen Repository-Ordner wählen oder einen ganzen Verzeichnisbaum durchsuchen.",
-            icon_name="folder-symbolic",
-        )
-        empty.set_vexpand(True)
-        self.listbox.set_placeholder(empty)
-        scroll.set_child(self.listbox)
-        body.append(scroll)
-
-        bottom = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        self.progress = Gtk.ProgressBar()
-        self.progress.set_hexpand(True)
-        self.progress.set_show_text(True)
-        self.progress.set_text("Bereit")
-        bottom.append(self.progress)
-        body.append(bottom)
-
-        expander = Gtk.Expander(label="Protokoll")
-        expander.set_expanded(True)
-        body.append(expander)
-        log_scroll = Gtk.ScrolledWindow()
-        log_scroll.set_min_content_height(132)
-        log_scroll.set_max_content_height(200)
-        log_scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-        self.logview = Gtk.TextView()
-        self.logview.set_editable(False)
-        self.logview.set_cursor_visible(False)
-        self.logview.set_monospace(True)
-        self.logview.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
-        self.logview.set_top_margin(6)
-        self.logview.set_left_margin(8)
-        self.logview.set_right_margin(8)
-        log_scroll.set_child(self.logview)
-        expander.set_child(log_scroll)
-
+        self.setWindowTitle("GitTool – Repository-Status und Pull")
+        self.resize(1270, 790)
+        self.setMinimumSize(850, 540)
+        self._build_ui()
         self._load_saved()
         self._update_summary()
-        self.window.present()
 
-    def _filter_row(self, row: Gtk.ListBoxRow) -> bool:
-        query = self.search.get_text().strip().casefold()
-        if not query:
-            return True
-        path = self.row_paths.get(row.get_name(), "")
-        state = self.states.get(path)
-        haystack = " ".join((
-            path,
-            state.branch if state else "",
-            state.upstream if state else "",
-            state.status if state else "",
-        )).casefold()
-        return query in haystack
+    def _button(self, label: str, handler: object, *, primary: bool = False) -> QPushButton:
+        button = QPushButton(label)
+        button.clicked.connect(handler)
+        if primary:
+            button.setObjectName("primaryAction")
+        self.buttons.append(button)
+        return button
+
+    def _build_ui(self) -> None:
+        wrapper = QWidget(self)
+        self.setCentralWidget(wrapper)
+        layout = QVBoxLayout(wrapper)
+        layout.setContentsMargins(20, 18, 20, 15)
+        layout.setSpacing(13)
+
+        heading = QHBoxLayout()
+        heading.setSpacing(12)
+        titles = QVBoxLayout()
+        title = QLabel("GitTool")
+        title.setObjectName("pageTitle")
+        titles.addWidget(title)
+        description = QLabel("Lokale Repositories prüfen und sicher per Fast-Forward aktualisieren")
+        description.setObjectName("subtitle")
+        titles.addWidget(description)
+        heading.addLayout(titles, 1)
+        heading.addWidget(self._button("＋ Repository", lambda: self._choose_folder(False)))
+        heading.addWidget(self._button("Ordner scannen", lambda: self._choose_folder(True)))
+        layout.addLayout(heading)
+
+        pathline = QHBoxLayout()
+        self.path_input = QLineEdit()
+        self.path_input.setPlaceholderText("Repository-Pfad eingeben, z. B. C:\\Projekte\\MeinRepo")
+        self.path_input.returnPressed.connect(self._add_typed)
+        pathline.addWidget(self.path_input, 1)
+        pathline.addWidget(self._button("Pfad hinzufügen", self._add_typed))
+        layout.addLayout(pathline)
+
+        command_bar = QHBoxLayout()
+        command_bar.setSpacing(7)
+        command_bar.addWidget(self._button("Auswahl entfernen", self._remove_selected))
+        command_bar.addSpacing(8)
+        self.selected_check = self._button(
+            "Auswahl prüfen", lambda: self._start("check", self._selected_paths())
+        )
+        command_bar.addWidget(self.selected_check)
+        self.all_check = self._button(
+            "Alle prüfen", lambda: self._start("check", list(self.repositories))
+        )
+        command_bar.addWidget(self.all_check)
+        command_bar.addSpacing(8)
+        self.selected_pull = self._button(
+            "Auswahl prüfen + Pull", lambda: self._start("pull", self._selected_paths())
+        )
+        command_bar.addWidget(self.selected_pull)
+        self.all_pull = self._button(
+            "Alle prüfen + Pull",
+            lambda: self._start("pull", list(self.repositories)),
+            primary=True,
+        )
+        self.all_pull.setToolTip(
+            "Prüfen und ausschließlich saubere Fast-Forward-Repositories aktualisieren"
+        )
+        command_bar.addWidget(self.all_pull)
+        command_bar.addStretch()
+        layout.addLayout(command_bar)
+
+        overview = QHBoxLayout()
+        self.summary = QLabel("0 Repositories")
+        self.summary.setObjectName("summary")
+        overview.addWidget(self.summary, 1)
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Suchen: Name, Pfad, Branch, Status …")
+        self.search.setClearButtonEnabled(True)
+        self.search.setMinimumWidth(270)
+        self.search.textChanged.connect(self._filter_rows)
+        overview.addWidget(self.search)
+        layout.addLayout(overview)
+
+        self.legend = QLabel(
+            "● Aktuell      ● Pull möglich      ● Lokale Änderungen      "
+            "● Divergiert / Fehler      ● Nicht geprüft"
+        )
+        self.legend.setObjectName("legend")
+        layout.addWidget(self.legend)
+
+        splitter = QSplitter(Qt.Orientation.Vertical)
+        self.tree = QTreeWidget()
+        self.tree.setColumnCount(len(COLUMNS))
+        self.tree.setHeaderLabels(COLUMNS)
+        self.tree.setAlternatingRowColors(True)
+        self.tree.setRootIsDecorated(False)
+        self.tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.tree.setUniformRowHeights(True)
+        self.tree.setSortingEnabled(True)
+        self.tree.setMinimumHeight(180)
+        self.tree.setAllColumnsShowFocus(True)
+        header = self.tree.header()
+        header.setStretchLastSection(True)
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        for col, width in enumerate((165, 145, 175, 85, 80, 80, 175, 380)):
+            self.tree.setColumnWidth(col, width)
+        self.tree.itemSelectionChanged.connect(self._refresh_buttons)
+        splitter.addWidget(self.tree)
+
+        logs = QFrame()
+        log_layout = QVBoxLayout(logs)
+        log_layout.setContentsMargins(0, 7, 0, 0)
+        log_header = QLabel("Aktivitätsprotokoll")
+        log_header.setObjectName("sectionTitle")
+        log_layout.addWidget(log_header)
+        self.log = QPlainTextEdit()
+        self.log.setReadOnly(True)
+        self.log.setMaximumBlockCount(1800)
+        log_layout.addWidget(self.log)
+        splitter.addWidget(logs)
+        splitter.setSizes([480, 170])
+        layout.addWidget(splitter, 1)
+
+        footer = QHBoxLayout()
+        self.activity = QLabel("Bereit")
+        footer.addWidget(self.activity)
+        footer.addStretch()
+        self.progress = QProgressBar()
+        self.progress.setMinimumWidth(220)
+        self.progress.setTextVisible(True)
+        self.progress.setRange(0, 1)
+        self.progress.setValue(0)
+        footer.addWidget(self.progress)
+        layout.addLayout(footer)
+        self.statusBar().showMessage("Mehrfachauswahl mit Strg oder Umschalt. Kein Merge und kein Rebase.")
+        self._refresh_buttons()
 
     def _register_repository(self, path: Path, *, persist: bool = True) -> bool:
         path = path.expanduser().resolve()
         key = os.path.normcase(str(path))
-        if any(os.path.normcase(str(old)) == key for old in self.repositories):
+        if any(os.path.normcase(str(p)) == key for p in self.repositories):
             return False
 
-        row = Adw.ActionRow(title=path.name, subtitle=str(path))
-        row_id = f"gittool-row-{self.next_row_id}"
-        self.next_row_id += 1
-        row.set_name(row_id)
-        self.row_paths[row_id] = str(path)
-        row.set_tooltip_text(str(path))
-        checkbox = Gtk.CheckButton()
-        checkbox.set_tooltip_text("Repository für Aktionen auswählen")
-        row.add_prefix(checkbox)
-
-        indicator = Gtk.Box()
-        indicator.add_css_class("repo-indicator")
-        indicator.add_css_class("indicator-muted")
-        row.add_prefix(indicator)
-
-        details = Gtk.Label(label="Branch: –     Upstream: –     ↑ 0   ↓ 0")
-        details.add_css_class("dim-label")
-        details.add_css_class("git-details")
-        details.set_ellipsize(Pango.EllipsizeMode.END)
-        details.set_max_width_chars(60)
-        details.set_tooltip_text("Noch nicht geprüft")
-        row.add_suffix(details)
-
-        badge = Gtk.Label(label="Nicht geprüft")
-        badge.add_css_class("status-pill")
-        badge.add_css_class("pill-muted")
-        row.add_suffix(badge)
-
-        self.listbox.append(row)
+        item = QTreeWidgetItem(
+            [path.name, "–", "–", "–", "–", "–", "Nicht geprüft", str(path)]
+        )
+        item.setData(0, Qt.ItemDataRole.UserRole, str(path))
+        item.setToolTip(0, str(path))
+        self.tree.addTopLevelItem(item)
         self.repositories.append(path)
-        self.widgets[str(path)] = (row, checkbox, indicator, details, badge)
+        self.items[str(path)] = item
+        self._colorize(item, "Nicht geprüft")
+        self._filter_rows()
+        self._update_summary()
         if persist:
             self._save()
-        self._update_summary()
         return True
 
-    def _set_status(self, path: Path, status: str, detail: str,
-                    state: RepositoryState | None = None) -> None:
-        key = str(path)
-        if key not in self.widgets:
+    def _colorize(self, item: QTreeWidgetItem, status: str) -> None:
+        label, category, _icon = visual_status(status)
+        dark = self.palette().color(self.backgroundRole()).lightness() < 128
+        palette = {
+            "ok": ("#81c995", "#153825") if dark else ("#176d38", "#e3f3e8"),
+            "info": ("#8fc6ff", "#193b5a") if dark else ("#176aa6", "#e2effa"),
+            "warn": ("#ffd078", "#543915") if dark else ("#935500", "#fff0d2"),
+            "error": ("#ff9795", "#562323") if dark else ("#b3261e", "#fbe6e5"),
+            "muted": ("#aab2bb", "#35373b") if dark else ("#6a7078", "#eef0f2"),
+        }
+        foreground, background = palette[category]
+        item.setText(STATUS_COLUMN, f"● {label}")
+        item.setForeground(STATUS_COLUMN, QBrush(QColor(foreground)))
+        item.setBackground(STATUS_COLUMN, QBrush(QColor(background)))
+        font = item.font(STATUS_COLUMN)
+        font.setBold(True)
+        item.setFont(STATUS_COLUMN, font)
+
+    def _display_state(self, state: RepositoryState) -> None:
+        key = str(state.path)
+        item = self.items.get(key)
+        if item is None:
             return
-        row, checkbox, indicator, details, badge = self.widgets[key]
-        for color in ("ok", "info", "warn", "error", "muted"):
-            badge.remove_css_class("pill-" + color)
-            indicator.remove_css_class("indicator-" + color)
-        label, color, _icon = visual_status(status)
-        badge.set_text(label)
-        badge.add_css_class("pill-" + color)
-        indicator.add_css_class("indicator-" + color)
-        row.set_tooltip_text(detail or key)
-        if state is not None:
-            self.states[key] = state
-            branch = state.branch or "–"
-            upstream = state.upstream or "–"
-            details.set_text(f"{branch}  →  {upstream}    ↑ {state.ahead}   ↓ {state.behind}"
-                             + ("    ● lokal geändert" if state.dirty else ""))
-            details.set_tooltip_text(
-                f"Branch: {branch}\nUpstream: {upstream}\nAhead: {state.ahead} / Behind: {state.behind}\n{detail}"
-            )
-            self.errors.pop(key, None)
-        elif status == "Fehler":
-            self.errors[key] = detail
-        self.listbox.invalidate_filter()
+        self.states[key] = state
+        self.errors.pop(key, None)
+        item.setText(1, state.branch or "–")
+        item.setText(2, state.upstream or "–")
+        item.setText(3, "Geändert" if state.dirty else "Sauber")
+        item.setText(4, str(state.ahead))
+        item.setText(5, str(state.behind))
+        item.setToolTip(STATUS_COLUMN, state.detail)
+        self._colorize(item, state.status)
+        self._filter_rows()
         self._update_summary()
 
-    def _add_entered_path(self) -> None:
-        value = self.path_entry.get_text().strip().strip('"')
-        if not value:
-            self._toast("Bitte einen Repository-Pfad eingeben.")
+    def _filter_rows(self) -> None:
+        query = self.search.text().strip().casefold()
+        for path in self.repositories:
+            item = self.items[str(path)]
+            text = " ".join(item.text(index) for index in range(len(COLUMNS))).casefold()
+            item.setHidden(bool(query and query not in text))
+        self._refresh_buttons()
+
+    def _selected_paths(self) -> list[Path]:
+        # Selection is independent of sorting and filtering.
+        return [
+            Path(str(item.data(0, Qt.ItemDataRole.UserRole)))
+            for item in self.tree.selectedItems() if not item.isHidden()
+        ]
+
+    def _refresh_buttons(self) -> None:
+        if self.busy:
+            for button in self.buttons:
+                button.setEnabled(False)
             return
+        any_repos = bool(self.repositories)
+        any_selection = bool(self._selected_paths())
+        self.selected_check.setEnabled(any_selection)
+        self.selected_pull.setEnabled(any_selection)
+        self.all_check.setEnabled(any_repos)
+        self.all_pull.setEnabled(any_repos)
+        # Remove button is the third button in the toolbar, after Add/Scan/Path.
+        for button in self.buttons:
+            if button.text() == "Auswahl entfernen":
+                button.setEnabled(any_selection)
+                break
+
+    def _choose_folder(self, scan: bool) -> None:
+        title = "Ordner mit Git-Repositories auswählen" if scan else "Git-Repository auswählen"
+        folder = QFileDialog.getExistingDirectory(self, title, str(Path.home()))
+        if not folder:
+            return
+        if scan:
+            self._start("scan", [Path(folder)])
+        else:
+            self._add_from_path(folder)
+
+    def _add_from_path(self, value: str) -> None:
         try:
             path = normalize_repository(value)
         except (GitToolError, OSError) as exc:
-            self._toast(str(exc))
             self._log(f"FEHLER: {exc}")
+            QMessageBox.warning(self, "Ungültiges Repository", str(exc))
             return
         if self._register_repository(path):
             self._log(f"Hinzugefügt: {path}")
         else:
-            self._toast("Repository bereits vorhanden.")
-        self.path_entry.set_text("")
+            self.statusBar().showMessage("Repository ist bereits vorhanden.", 4000)
 
-    def _choose_folder(self, *, scan: bool) -> None:
-        dialog = Gtk.FileDialog()
-        dialog.set_title(
-            "Übergeordneten Ordner durchsuchen" if scan else "Git-Repository auswählen"
-        )
-
-        def chosen(dlg: Gtk.FileDialog, result: Gio.AsyncResult) -> None:
-            try:
-                folder = dlg.select_folder_finish(result)
-            except GLib.Error as exc:
-                if not exc.matches(Gtk.DialogError.quark(), Gtk.DialogError.DISMISSED):
-                    self._toast(str(exc))
-                return
-            if folder is None or folder.get_path() is None:
-                self._toast("Nur lokale Ordner werden unterstützt.")
-                return
-            path = Path(folder.get_path())
-            if scan:
-                self._start("scan", [path])
-            else:
-                try:
-                    normalized = normalize_repository(path)
-                    if self._register_repository(normalized):
-                        self._log(f"Hinzugefügt: {normalized}")
-                    else:
-                        self._toast("Repository bereits vorhanden.")
-                except (GitToolError, OSError) as exc:
-                    self._toast(str(exc))
-
-        dialog.select_folder(self.window, None, chosen)
-
-    def _selected_paths(self) -> list[Path]:
-        return [
-            path for path in self.repositories
-            if self.widgets[str(path)][1].get_active()
-        ]
-
-    def _toggle_selection(self) -> None:
-        all_selected = bool(self.repositories) and all(
-            self.widgets[str(path)][1].get_active() for path in self.repositories
-        )
-        for path in self.repositories:
-            self.widgets[str(path)][1].set_active(not all_selected)
-        self.select_button.set_label("Alle auswählen" if all_selected else "Auswahl aufheben")
+    def _add_typed(self) -> None:
+        raw = self.path_input.text().strip().strip('"')
+        if not raw:
+            QMessageBox.information(self, "Repository hinzufügen", "Bitte einen lokalen Pfad eingeben.")
+            return
+        self._add_from_path(raw)
+        self.path_input.clear()
 
     def _remove_selected(self) -> None:
         selected = self._selected_paths()
         if not selected:
-            self._toast("Bitte zuerst Repositories auswählen.")
             return
         for path in selected:
             key = str(path)
-            row = self.widgets[key][0]
-            self.row_paths.pop(row.get_name(), None)
-            self.listbox.remove(row)
-            self.widgets.pop(key)
+            item = self.items.pop(key)
+            index = self.tree.indexOfTopLevelItem(item)
+            if index >= 0:
+                self.tree.takeTopLevelItem(index)
             self.states.pop(key, None)
             self.errors.pop(key, None)
         selected_set = set(selected)
         self.repositories = [p for p in self.repositories if p not in selected_set]
         self._save()
-        self._log(f"{len(selected)} Repository(s) aus der Liste entfernt – keine Dateien gelöscht.")
+        self._log(f"{len(selected)} Repository(s) aus der Liste entfernt (keine Dateien gelöscht).")
         self._update_summary()
-
-    def _save(self) -> None:
-        try:
-            save_repositories(self.repositories)
-        except OSError as exc:
-            self._toast(f"Speichern fehlgeschlagen: {exc}")
-            self._log(f"FEHLER beim Speichern: {exc}")
+        self._refresh_buttons()
 
     def _load_saved(self) -> None:
         try:
             paths = load_repositories()
         except (OSError, ValueError) as exc:
-            self._toast(f"Konfiguration kann nicht gelesen werden: {exc}")
-            self._log(f"FEHLER: {exc} ({default_config_path()})")
+            self._log(f"FEHLER beim Lesen von {default_config_path()}: {exc}")
+            QMessageBox.warning(self, "Konfiguration", f"Repositories konnten nicht geladen werden:\n{exc}")
             return
         for path in paths:
             self._register_repository(path, persist=False)
-        self._log(f"{len(self.repositories)} Repository(s) geladen.")
+        self._log(f"{len(self.repositories)} Repository(s) aus der Konfiguration geladen.")
+
+    def _save(self) -> None:
+        try:
+            save_repositories(self.repositories)
+        except OSError as exc:
+            self._log(f"FEHLER beim Speichern: {exc}")
+            QMessageBox.warning(self, "Konfiguration", str(exc))
 
     def _start(self, operation: str, paths: list[Path]) -> None:
         if self.busy:
             return
         if not paths:
-            self._toast("Bitte mindestens ein Repository hinzufügen oder auswählen.")
+            QMessageBox.information(self, "Keine Repositories", "Bitte Repositories auswählen oder hinzufügen.")
             return
         self.busy = True
-        self.processed = 0
-        self.total = len(paths)
-        self.progress.set_fraction(0)
-        self.progress.set_text(f"0 / {self.total}")
+        self.completed = 0
+        self.total = 1 if operation == "scan" else len(paths)
+        self.progress.setRange(0, self.total)
+        self.progress.setValue(0)
+        self.activity.setText(f"{operation}: 0 / {self.total}")
         for button in self.buttons:
-            button.set_sensitive(False)
-        self.path_entry.set_sensitive(False)
-        self._log(f"--- {operation}: {self.total} Verzeichnis(se) ---")
+            button.setEnabled(False)
+        self.path_input.setEnabled(False)
+        self._log(f"--- {operation}: {len(paths)} Repository(s) / Ordner ---")
         try:
             self.executor.submit(self._work, operation, paths)
         except RuntimeError as exc:
-            self._event("error", (paths[0], str(exc)))
-            self._event("done", None)
+            self.events.error.emit(paths[0], str(exc))
+            self.events.finished.emit()
 
     def _work(self, operation: str, paths: list[Path]) -> None:
         try:
             if operation == "scan":
                 try:
-                    self._emit("scan", discover_repositories(paths[0]))
+                    self.events.scan.emit(discover_repositories(paths[0]))
                 except Exception as exc:
-                    self._emit("error", (paths[0], str(exc)))
+                    self.events.error.emit(paths[0], str(exc))
             else:
                 for path in paths:
                     try:
                         if operation == "check":
-                            self._emit("status", inspect_repository(path, fetch=True))
+                            self.events.state.emit(inspect_repository(path, fetch=True))
                         else:
-                            self._emit("pull", pull_repository(path))
+                            self.events.outcome.emit(pull_repository(path))
                     except Exception as exc:
-                        self._emit("error", (path, str(exc)))
+                        self.events.error.emit(path, str(exc))
         finally:
-            self._emit("done", None)
+            self.events.finished.emit()
 
-    def _emit(self, kind: str, payload: object) -> None:
-        GLib.idle_add(self._event, kind, payload)
+    def _on_state(self, state: RepositoryState) -> None:
+        self._display_state(state)
+        self._log(f"{state.name}: {state.status} – {state.detail}")
+        self._advance()
 
-    def _event(self, kind: str, payload: object) -> bool:
-        if self.closing:
-            return False
-        if kind == "status":
-            state: RepositoryState = payload
-            self._set_status(state.path, state.status, state.detail, state)
-            self._log(f"{state.name}: {state.status} – {state.detail}")
-            self._advance()
-        elif kind == "pull":
-            outcome: PullOutcome = payload
-            self._set_status(
-                outcome.state.path, outcome.state.status,
-                outcome.state.detail, outcome.state,
-            )
-            self._log(f"{outcome.state.name}: {outcome.action}\n{outcome.message}")
-            self._advance()
-        elif kind == "error":
-            path, detail = payload
-            self._set_status(path, "Fehler", detail)
-            self._log(f"FEHLER {path}: {detail}")
-            self._advance()
-        elif kind == "scan":
-            discovered = payload
-            count = sum(self._register_repository(path, persist=False) for path in discovered)
-            if count:
-                self._save()
-            self._log(f"Suche: {len(discovered)} gefunden, {count} neu aufgenommen.")
-            self._toast(f"{count} Repository(s) hinzugefügt.")
-            self._advance()
-        elif kind == "done":
-            self.busy = False
-            for button in self.buttons:
-                button.set_sensitive(True)
-            self.path_entry.set_sensitive(True)
-            self.progress.set_text("Abgeschlossen")
-            self._log("--- Fertig ---")
-        return False
+    def _on_outcome(self, outcome: PullOutcome) -> None:
+        self._display_state(outcome.state)
+        self._log(f"{outcome.state.name}: {outcome.action}\n{outcome.message}")
+        self._advance()
+
+    def _on_error(self, path: Path, detail: str) -> None:
+        key = str(path)
+        item = self.items.get(key)
+        if item is not None:
+            self.errors[key] = detail
+            self._colorize(item, "Fehler")
+            item.setToolTip(STATUS_COLUMN, detail)
+        self._log(f"FEHLER {path}: {detail}")
+        self._update_summary()
+        self._advance()
+
+    def _on_scan(self, discovered: list[Path]) -> None:
+        count = sum(self._register_repository(p, persist=False) for p in discovered)
+        if count:
+            self._save()
+        self._log(f"Suche: {len(discovered)} gefunden, {count} neu aufgenommen.")
+        self.statusBar().showMessage(f"{count} Repository(s) hinzugefügt.", 7000)
+        self._advance()
 
     def _advance(self) -> None:
-        self.processed += 1
-        self.progress.set_fraction(self.processed / max(self.total, 1))
-        self.progress.set_text(f"{self.processed} / {self.total}")
+        self.completed += 1
+        self.progress.setValue(min(self.completed, self.total))
+        self.activity.setText(f"{self.completed} / {self.total}")
+
+    def _on_finished(self) -> None:
+        self.busy = False
+        self.activity.setText("Abgeschlossen")
+        self.path_input.setEnabled(True)
+        self._refresh_buttons()
+        self._log("--- Fertig ---")
 
     def _update_summary(self) -> None:
-        current = sum(s.status == "Aktuell" for key, s in self.states.items() if key not in self.errors)
-        pullable = sum(s.status == "Pull möglich" for key, s in self.states.items() if key not in self.errors)
-        warnings = sum(s.status in ("Lokale Änderungen", "Nur lokal voraus") for key, s in self.states.items() if key not in self.errors)
-        errors = sum(s.status in ("Divergiert", "Detached HEAD", "Kein Upstream", "Kein Remote")
-                     for key, s in self.states.items() if key not in self.errors) + len(self.errors)
-        self.summary.set_text(
+        current = sum(s.status == "Aktuell" for k, s in self.states.items() if k not in self.errors)
+        behind = sum(s.status == "Pull möglich" for k, s in self.states.items() if k not in self.errors)
+        warnings = sum(s.status in ("Lokale Änderungen", "Nur lokal voraus", "Kein Upstream", "Kein Remote")
+                       for k, s in self.states.items() if k not in self.errors)
+        blocked = sum(s.status in ("Divergiert", "Detached HEAD")
+                      for k, s in self.states.items() if k not in self.errors) + len(self.errors)
+        self.summary.setText(
             f"{len(self.repositories)} Repositories   ·   {current} aktuell   ·   "
-            f"{pullable} Pull möglich   ·   {warnings} lokal   ·   {errors} blockiert"
+            f"{behind} Pull möglich   ·   {warnings} lokal   ·   {blocked} blockiert"
         )
 
     def _log(self, message: str) -> None:
-        buffer = self.logview.get_buffer()
         stamp = datetime.now().strftime("%H:%M:%S")
-        buffer.insert(buffer.get_end_iter(), f"[{stamp}] {message}\n")
+        self.log.appendPlainText(f"[{stamp}] {message}")
 
-    def _toast(self, message: str) -> None:
-        self.toasts.add_toast(Adw.Toast.new(message))
-
-    def _on_close_request(self, _window: Adw.ApplicationWindow) -> bool:
+    def closeEvent(self, event: object) -> None:
         if self.busy:
-            self._toast("Git-Vorgang läuft noch. Vor dem Schließen bitte abschließen lassen.")
-            return True
-        self.closing = True
+            QMessageBox.information(
+                self, "Git-Vorgang läuft",
+                "Bitte den laufenden Git-Vorgang vor dem Schließen abschließen lassen.",
+            )
+            event.ignore()
+            return
         self.executor.shutdown(wait=False, cancel_futures=True)
-        return False
+        event.accept()
+
+
+STYLE = """
+QWidget { font-size: 10pt; }
+QMainWindow { background: palette(window); }
+QLabel#pageTitle { font-size: 21pt; font-weight: bold; }
+QLabel#subtitle { color: palette(mid); font-size: 10pt; }
+QLabel#summary { font-size: 11pt; font-weight: bold; }
+QLabel#legend { color: palette(mid); font-size: 9pt; padding: 3px; }
+QLabel#sectionTitle { font-size: 10pt; font-weight: bold; }
+QLineEdit { padding: 8px 11px; border: 1px solid palette(midlight); border-radius: 7px; }
+QLineEdit:focus { border: 1px solid #3988cb; }
+QPushButton { padding: 7px 11px; border: 1px solid palette(midlight); border-radius: 7px; }
+QPushButton#primaryAction { background: #176aa6; color: white; border-color: #176aa6; font-weight: bold; }
+QPushButton#primaryAction:hover { background: #125c95; }
+QTreeWidget { border: 1px solid palette(midlight); border-radius: 8px; }
+QTreeWidget::item { min-height: 27px; padding: 2px; }
+QPlainTextEdit { border: 1px solid palette(midlight); border-radius: 8px; }
+QProgressBar { height: 13px; border: 1px solid palette(midlight); border-radius: 6px; text-align: center; }
+QProgressBar::chunk { border-radius: 5px; background: #3988cb; }
+"""
 
 
 def main() -> int:
-    """Installed 'gittool' launcher and 'python -m gittool' entrypoint."""
-    return GitToolApp().run(sys.argv)
+    """Entry point for the Windows-compatible PySide6 interface."""
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication(sys.argv)
+    app.setApplicationName("GitTool")
+    app.setOrganizationName("Protarios")
+    app.setStyle("Fusion")
+    app.setStyleSheet(STYLE)
+    window = GitToolWindow()
+    window.show()
+    return app.exec()
