@@ -1,12 +1,12 @@
-# GitTool – Windows-Version (Qt 6)
+# GitTool – Qt 6 (Windows und Linux)
 
-Dieser Branch stellt eine moderne, native **Windows-GUI mit PySide6/Qt 6**
-bereit. Sie verwendet wie die Linux-GTK-Version die Python-Bibliothek
+Dieser Branch stellt eine moderne, plattformübergreifende **GUI mit PySide6/Qt 6**
+für **Windows und Linux** bereit. Sie verwendet wie die Linux-GTK-Version die Python-Bibliothek
 [gittyup](https://github.com/mikeckennedy/gittyup) von Michael Kennedy
 (nicht die gleichnamige Gittyup-GUI).
 
 **Branch-Übersicht:**
-- [windows](https://github.com/Protarios/gittool/tree/windows): Qt6/PySide6, Windows; ohne GTK, PyGObject oder MSYS2.
+- [windows](https://github.com/Protarios/gittool/tree/windows): Qt6/PySide6 für Windows **und Linux**; ohne GTK, PyGObject oder MSYS2.
 - [gpt](https://github.com/Protarios/gittool/tree/gpt): GTK4/libadwaita für Linux.
 
 Die Git-Funktionen und das Konfigurationsformat sind identisch. Beim Wechsel
@@ -14,7 +14,7 @@ zwischen den Versionen auf demselben Rechner bleibt die Repository-Liste erhalte
 
 ## Voraussetzungen
 
-- **Windows 10/11** (64 Bit).
+- **Windows 10/11 oder Linux** (64 Bit).
 - **Python 3.13 oder 3.14**, mit pip und venv.
 - Git for Windows; \`git.exe\` muss über \`PATH\` erreichbar sein.
 - Netzwerkzugang und Git-Anmeldedaten/SSH-Schlüssel für Remote-Repositories.
@@ -57,6 +57,37 @@ Du kannst alternativ \`python -m gittool\` verwenden.
 Ein erneuter pip-Aufruf ist nur nötig, wenn sich Python-Abhängigkeiten ändern.
 Ein Paket, das mit \`pip install -e .\` installiert wurde, verwendet sonst
 direkt die ausgecheckten Python-Quelldateien.
+
+## Installation unter Linux
+
+Für CachyOS, Arch Linux und andere Linux-Distributionen mit Python 3.13+:
+
+~~~bash
+git clone --branch windows https://github.com/Protarios/gittool.git
+cd gittool
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -e .
+gittool
+~~~
+
+Ein zuvor vorhandenes GitTool-Repository auf `gpt` kannst du auf
+`windows` umstellen:
+
+~~~bash
+git fetch origin
+git switch --track origin/windows
+python -m pip install -e .
+gittool
+~~~
+
+Falls `windows` lokal bereits existiert, verwende
+`git switch windows && git pull --ff-only`.
+Es ist für die Qt-Version **nicht nötig**, `include-system-site-packages = true`
+zu setzen oder `gi` zu installieren.
+
+Die automatisierten GUI- und Backend-Tests laufen für **Linux und Windows**
+mit **Python 3.13 und 3.14** (Qt unter Linux im Headless-Modus).
 
 ## Funktionalität
 
