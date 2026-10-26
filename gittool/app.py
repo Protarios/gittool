@@ -27,10 +27,11 @@ except ImportError as exc:
     ) from exc
 
 from .backend import (
-    GitToolError, PullOutcome, RepositoryState, discover_repositories,
+    GitToolError, PullOutcome, RepositoryState, discover_repositories, discover_submodules,
     inspect_repository, normalize_repository, pull_repository,
 )
-from .config import default_config_path, load_repositories, save_repositories
+from .config import default_config_path, load_repository_entries, save_repository_entries
+from .repository_catalog import RepositoryCatalog
 from .status_style import visual_status
 
 
@@ -55,6 +56,7 @@ class WorkerEvents(QObject):
 class GitToolWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
+        self.catalog = RepositoryCatalog()
         self.repositories: list[Path] = []
         self.states: dict[str, RepositoryState] = {}
         self.errors: dict[str, str] = {}
@@ -118,6 +120,10 @@ class GitToolWindow(QMainWindow):
         command_bar = QHBoxLayout()
         command_bar.setSpacing(7)
         command_bar.addWidget(self._button("Auswahl entfernen", self._remove_selected))
+        self.move_up = self._button("↑ Nach oben", lambda: self._move_selected(-1))
+        self.move_down = self._button("↓ Nach unten", lambda: self._move_selected(1))
+        command_bar.addWidget(self.move_up)
+        command_bar.addWidget(self.move_down)
         command_bar.addSpacing(8)
         self.selected_check = self._button(
             "Auswahl prüfen", lambda: self._start("check", self._selected_paths())
@@ -168,10 +174,10 @@ class GitToolWindow(QMainWindow):
         self.tree.setColumnCount(len(COLUMNS))
         self.tree.setHeaderLabels(COLUMNS)
         self.tree.setAlternatingRowColors(True)
-        self.tree.setRootIsDecorated(False)
+        self.tree.setRootIsDecorated(True)
         self.tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.tree.setUniformRowHeights(True)
-        self.tree.setSortingEnabled(True)
+        self.tree.setSortingEnabled(False)
         self.tree.setMinimumHeight(180)
         self.tree.setAllColumnsShowFocus(True)
         header = self.tree.header()
