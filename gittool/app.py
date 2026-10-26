@@ -444,7 +444,10 @@ class GitToolApp(Adw.Application):
         if not selected:
             self._toast("Bitte zuerst Repositories auswählen.")
             return
+        removed: list[Path] = []
         for path in selected:
+            removed.extend(self.catalog.remove(path))
+        for path in removed:
             key = str(path)
             row = self.widgets[key][0]
             self.row_paths.pop(row.get_name(), None)
@@ -452,28 +455,32 @@ class GitToolApp(Adw.Application):
             self.widgets.pop(key)
             self.states.pop(key, None)
             self.errors.pop(key, None)
-        selected_set = set(selected)
-        self.repositories = [p for p in self.repositories if p not in selected_set]
+        self._sync_rows()
         self._save()
-        self._log(f"{len(selected)} Repository(s) aus der Liste entfernt – keine Dateien gelöscht.")
-        self._update_summary()
+        self._log(f"{len(removed)} Repository(s) aus der Liste entfernt – keine Dateien gelöscht.")
 
     def _save(self) -> None:
         try:
-            save_repositories(self.repositories)
+            save_repository_entries(self.catalog.entries)
         except OSError as exc:
             self._toast(f"Speichern fehlgeschlagen: {exc}")
             self._log(f"FEHLER beim Speichern: {exc}")
 
     def _load_saved(self) -> None:
         try:
-            paths = load_repositories()
+            entries = load_repository_entries()
         except (OSError, ValueError) as exc:
             self._toast(f"Konfiguration kann nicht gelesen werden: {exc}")
             self._log(f"FEHLER: {exc} ({default_config_path()})")
             return
-        for path in paths:
-            self._register_repository(path, persist=False)
+        for entry in entries:
+            self._register_repository(entry.path, parent=entry.parent,
+                                      persist=False, discover=False)
+        roots = [entry.path for entry in self.catalog.entries if entry.parent is None]
+        for root in roots:
+            self._register_repository(root, persist=False, discover=True)
+        if self.catalog.entries != entries:
+            self._save()
         self._log(f"{len(self.repositories)} Repository(s) geladen.")
 
     def _start(self, operation: str, paths: list[Path]) -> None:
