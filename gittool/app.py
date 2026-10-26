@@ -11,7 +11,7 @@ try:
     import gi
     gi.require_version("Gtk", "4.0")
     gi.require_version("Adw", "1")
-    from gi.repository import Adw, Gdk, Gio, GLib, Gtk
+    from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango
 except (ImportError, ValueError) as exc:
     raise SystemExit(
         "GTK 4 / libadwaita / PyGObject fehlen.\n"
@@ -63,6 +63,8 @@ class GitToolApp(Adw.Application):
         self.states: dict[str, RepositoryState] = {}
         self.errors: dict[str, str] = {}
         self.widgets: dict[str, tuple] = {}
+        self.row_paths: dict[str, str] = {}
+        self.next_row_id = 0
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="gittool")
         self.busy = False
         self.closing = False
@@ -228,7 +230,7 @@ class GitToolApp(Adw.Application):
         query = self.search.get_text().strip().casefold()
         if not query:
             return True
-        path = str(row.get_name())
+        path = self.row_paths.get(row.get_name(), "")
         state = self.states.get(path)
         haystack = " ".join((
             path,
@@ -245,7 +247,10 @@ class GitToolApp(Adw.Application):
             return False
 
         row = Adw.ActionRow(title=path.name, subtitle=str(path))
-        row.set_name(str(path))
+        row_id = f"gittool-row-{self.next_row_id}"
+        self.next_row_id += 1
+        row.set_name(row_id)
+        self.row_paths[row_id] = str(path)
         row.set_tooltip_text(str(path))
         checkbox = Gtk.CheckButton()
         checkbox.set_tooltip_text("Repository für Aktionen auswählen")
@@ -259,7 +264,7 @@ class GitToolApp(Adw.Application):
         details = Gtk.Label(label="Branch: –     Upstream: –     ↑ 0   ↓ 0")
         details.add_css_class("dim-label")
         details.add_css_class("git-details")
-        details.set_ellipsize(3)  # Pango.EllipsizeMode.END
+        details.set_ellipsize(Pango.EllipsizeMode.END)
         details.set_max_width_chars(60)
         details.set_tooltip_text("Noch nicht geprüft")
         row.add_suffix(details)
@@ -375,7 +380,9 @@ class GitToolApp(Adw.Application):
             return
         for path in selected:
             key = str(path)
-            self.listbox.remove(self.widgets[key][0])
+            row = self.widgets[key][0]
+            self.row_paths.pop(row.get_name(), None)
+            self.listbox.remove(row)
             self.widgets.pop(key)
             self.states.pop(key, None)
             self.errors.pop(key, None)
@@ -490,11 +497,11 @@ class GitToolApp(Adw.Application):
         self.progress.set_text(f"{self.processed} / {self.total}")
 
     def _update_summary(self) -> None:
-        current = sum(s.status == "Aktuell" for s in self.states.values())
-        pullable = sum(s.status == "Pull möglich" for s in self.states.values())
-        warnings = sum(s.status in ("Lokale Änderungen", "Nur lokal voraus") for s in self.states.values())
+        current = sum(s.status == "Aktuell" for key, s in self.states.items() if key not in self.errors)
+        pullable = sum(s.status == "Pull möglich" for key, s in self.states.items() if key not in self.errors)
+        warnings = sum(s.status in ("Lokale Änderungen", "Nur lokal voraus") for key, s in self.states.items() if key not in self.errors)
         errors = sum(s.status in ("Divergiert", "Detached HEAD", "Kein Upstream", "Kein Remote")
-                     for s in self.states.values()) + len(self.errors)
+                     for key, s in self.states.items() if key not in self.errors) + len(self.errors)
         self.summary.set_text(
             f"{len(self.repositories)} Repositories   ·   {current} aktuell   ·   "
             f"{pullable} Pull möglich   ·   {warnings} lokal   ·   {errors} blockiert"
