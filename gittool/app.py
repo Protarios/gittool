@@ -256,12 +256,7 @@ class GitToolApp(Adw.Application):
         )).casefold()
         return query in haystack
 
-    def _register_repository(self, path: Path, *, persist: bool = True) -> bool:
-        path = path.expanduser().resolve()
-        key = os.path.normcase(str(path))
-        if any(os.path.normcase(str(old)) == key for old in self.repositories):
-            return False
-
+    def _create_row(self, path: Path) -> None:
         row = Adw.ActionRow(title=path.name, subtitle=str(path))
         row_id = f"gittool-row-{self.next_row_id}"
         self.next_row_id += 1
@@ -290,13 +285,68 @@ class GitToolApp(Adw.Application):
         badge.add_css_class("pill-muted")
         row.add_suffix(badge)
 
-        self.listbox.append(row)
-        self.repositories.append(path)
         self.widgets[str(path)] = (row, checkbox, indicator, details, badge)
-        if persist:
-            self._save()
+        self.listbox.append(row)
+
+    def _sync_rows(self) -> None:
+        """Keep visual order in sync with catalog while retaining row state."""
+        self.repositories = self.catalog.paths
+        for entry in self.catalog.entries:
+            path = entry.path
+            if str(path) not in self.widgets:
+                self._create_row(path)
+            row = self.widgets[str(path)][0]
+            depth = self.catalog.depth(path)
+            row.set_title(("↳ " * depth) + path.name)
+            row.set_subtitle(
+                f"Submodul von {entry.parent.name}  ·  {path}"
+                if entry.parent else str(path)
+            )
+            row.set_tooltip_text(
+                f"Submodul von: {entry.parent}\n{path}" if entry.parent else str(path)
+            )
+        for index, entry in enumerate(self.catalog.entries):
+            row = self.widgets[str(entry.path)][0]
+            self.listbox.remove(row)
+            self.listbox.insert(row, index)
+        self.listbox.invalidate_filter()
         self._update_summary()
-        return True
+
+    def _register_repository(
+        self, path: Path, *, parent: Path | None = None,
+        persist: bool = True, discover: bool = True,
+    ) -> bool:
+        path = Path(path).expanduser().resolve()
+        added = self.catalog.add(path, parent) if not self.catalog.has(path) else False
+        changed = added
+        if parent is not None and not added:
+            changed = self.catalog.attach(path, parent) or changed
+        if discover:
+            try:
+                descendants = discover_submodules(path)
+            except GitToolError as exc:
+                descendants = []
+                self._log(f"Submodule konnten nicht geprüft werden ({path}): {exc}")
+            for child, immediate_parent in descendants:
+                if not self.catalog.has(child):
+                    self.catalog.add(child, immediate_parent)
+                    changed = True
+                else:
+                    changed = self.catalog.attach(child, immediate_parent) or changed
+        if changed:
+            self._sync_rows()
+            if persist:
+                self._save()
+        return added
+
+    def _move_selected(self, direction: int) -> None:
+        selected = self._selected_paths()
+        if len(selected) != 1:
+            self._toast("Zum Verschieben bitte genau ein Repository auswählen.")
+            return
+        if self.catalog.move(selected[0], direction):
+            self._sync_rows()
+            self._save()
 
     def _set_status(self, path: Path, status: str, detail: str,
                     state: RepositoryState | None = None) -> None:
