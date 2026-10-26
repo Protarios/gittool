@@ -1,356 +1,522 @@
-"""Cross-platform Tkinter frontend for gittyup."""
+"""GTK4 + libadwaita desktop UI. Git operations never run in the GTK main loop."""
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
-import os
 from pathlib import Path
-from queue import Empty, Queue
-import tkinter as tk
-from tkinter import filedialog, messagebox, scrolledtext, ttk
+import os
+import sys
+
+try:
+    import gi
+    gi.require_version("Gtk", "4.0")
+    gi.require_version("Adw", "1")
+    from gi.repository import Adw, Gdk, Gio, GLib, Gtk
+except (ImportError, ValueError) as exc:
+    raise SystemExit(
+        "GTK 4 / libadwaita / PyGObject fehlen.\n"
+        "Arch: sudo pacman -S python-gobject gtk4 libadwaita\n"
+        "Debian/Ubuntu: sudo apt install python3-gi gir1.2-gtk-4.0 gir1.2-adw-1\n"
+        "Wichtig: Die virtuelle Python-Umgebung muss 'gi' sehen. "
+        "Siehe Installationshinweise in README.md."
+    ) from exc
 
 from .backend import (
     GitToolError, PullOutcome, RepositoryState, discover_repositories,
     inspect_repository, normalize_repository, pull_repository,
 )
 from .config import default_config_path, load_repositories, save_repositories
+from .status_style import visual_status
 
 
-COLUMNS = (
-    ("name", "Repository", 150),
-    ("branch", "Branch", 115),
-    ("upstream", "Upstream", 155),
-    ("dirty", "Dateien", 90),
-    ("ahead", "Ahead", 65),
-    ("behind", "Behind", 65),
-    ("status", "Status", 170),
-    ("path", "Lokaler Pfad", 330),
-)
+CSS = """
+.repo-indicator { min-width: 5px; min-height: 34px; border-radius: 6px; }
+.indicator-ok { background: @success_color; }
+.indicator-info { background: @accent_color; }
+.indicator-warn { background: @warning_color; }
+.indicator-error { background: @error_color; }
+.indicator-muted { background: @insensitive_fg_color; }
+.status-pill {
+    border-radius: 999px;
+    padding: 5px 12px;
+    font-weight: 700;
+    font-size: 0.88em;
+    min-width: 95px;
+}
+.pill-ok { color: @success_color; background: alpha(@success_color, .13); }
+.pill-info { color: @accent_color; background: alpha(@accent_color, .13); }
+.pill-warn { color: @warning_color; background: alpha(@warning_color, .15); }
+.pill-error { color: @error_color; background: alpha(@error_color, .13); }
+.pill-muted { color: @insensitive_fg_color; background: alpha(@insensitive_fg_color, .10); }
+.git-details { font-size: 0.89em; }
+.repo-list { border-radius: 12px; }
+.section-label { font-weight: 700; }
+"""
 
 
-class GitToolApp(tk.Tk):
+class GitToolApp(Adw.Application):
+    """One application/window; all GTK calls remain on the main thread."""
+
     def __init__(self) -> None:
-        super().__init__()
-        self.title("GitTool – Repository-Status & Pull (gittyup)")
-        self.geometry("1280x760")
-        self.minsize(920, 560)
-
+        super().__init__(application_id="io.github.protarios.gittool")
         self.repositories: list[Path] = []
         self.states: dict[str, RepositoryState] = {}
-        self.events: Queue[tuple] = Queue()
+        self.errors: dict[str, str] = {}
+        self.widgets: dict[str, tuple] = {}
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="gittool")
         self.busy = False
-        self.buttons: list[ttk.Button] = []
-        self.path_var = tk.StringVar()
-        self.summary_var = tk.StringVar(value="0 Repositories")
-        self.activity_var = tk.StringVar(value="Bereit")
-        self._total = 0
-        self._finished = 0
+        self.closing = False
+        self.buttons: list[Gtk.Button] = []
+        self.window: Adw.ApplicationWindow | None = None
+        self.processed = 0
+        self.total = 0
 
-        self._build_ui()
-        self._load_repositories()
-        self.after(100, self._drain_events)
-        self.protocol("WM_DELETE_WINDOW", self._close)
-
-    def _button(self, parent: ttk.Frame, label: str, command: object) -> ttk.Button:
-        button = ttk.Button(parent, text=label, command=command)
-        button.pack(side=tk.LEFT, padx=(0, 6), pady=3)
-        self.buttons.append(button)
-        return button
-
-    def _build_ui(self) -> None:
-        outer = ttk.Frame(self, padding=12)
-        outer.pack(fill=tk.BOTH, expand=True)
-
-        ttk.Label(
-            outer, text="GitTool", font=("TkDefaultFont", 17, "bold")
-        ).pack(anchor=tk.W)
-        ttk.Label(
-            outer, text="Lokale Repositories verwalten, Remote-Status prüfen und sicher per Fast-Forward aktualisieren."
-        ).pack(anchor=tk.W, pady=(2, 10))
-
-        path_row = ttk.Frame(outer)
-        path_row.pack(fill=tk.X, pady=(0, 6))
-        ttk.Label(path_row, text="Pfad:").pack(side=tk.LEFT, padx=(0, 6))
-        entry = ttk.Entry(path_row, textvariable=self.path_var)
-        entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
-        entry.bind("<Return>", lambda _event: self._add_typed())
-        self._button(path_row, "Hinzufügen", self._add_typed)
-        self._button(path_row, "Ordner wählen …", self._browse_add)
-        self._button(path_row, "Ordner durchsuchen …", self._scan_folder)
-
-        operations = ttk.Frame(outer)
-        operations.pack(fill=tk.X, pady=(0, 7))
-        self._button(operations, "Auswahl entfernen", self._remove_selected)
-        ttk.Separator(operations, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=9)
-        self._button(operations, "Auswahl prüfen", lambda: self._operate("check", True))
-        self._button(operations, "Alle prüfen", lambda: self._operate("check", False))
-        ttk.Separator(operations, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=9)
-        self._button(operations, "Auswahl: prüfen + Pull", lambda: self._operate("pull", True))
-        self._button(operations, "Alle: prüfen + Pull", lambda: self._operate("pull", False))
-
-        ttk.Label(
-            outer, text="Mehrfachauswahl: Strg/Umschalt. Pull nur bei sauberem Arbeitsverzeichnis, Upstream und Fast-Forward.",
-        ).pack(anchor=tk.W, pady=(0, 7))
-
-        table_frame = ttk.Frame(outer)
-        table_frame.pack(fill=tk.BOTH, expand=True)
-        self.tree = ttk.Treeview(
-            table_frame, columns=[item[0] for item in COLUMNS],
-            show="headings", selectmode="extended", height=13,
-        )
-        for key, label, width in COLUMNS:
-            self.tree.heading(key, text=label)
-            self.tree.column(key, width=width, minwidth=55, stretch=(key == "path"))
-        self.tree.tag_configure("ok", foreground="#137333")
-        self.tree.tag_configure("ready", foreground="#0b63a7")
-        self.tree.tag_configure("warning", foreground="#965f00")
-        self.tree.tag_configure("error", foreground="#b3261e")
-        yscroll = ttk.Scrollbar(table_frame, orient=tk.VERTICAL, command=self.tree.yview)
-        xscroll = ttk.Scrollbar(table_frame, orient=tk.HORIZONTAL, command=self.tree.xview)
-        self.tree.configure(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
-        self.tree.grid(row=0, column=0, sticky="nsew")
-        yscroll.grid(row=0, column=1, sticky="ns")
-        xscroll.grid(row=1, column=0, sticky="ew")
-        table_frame.rowconfigure(0, weight=1)
-        table_frame.columnconfigure(0, weight=1)
-
-        log_frame = ttk.LabelFrame(outer, text="Protokoll", padding=(8, 5))
-        log_frame.pack(fill=tk.BOTH, expand=False, pady=(10, 5))
-        self.log = scrolledtext.ScrolledText(
-            log_frame, height=9, state=tk.DISABLED, wrap=tk.WORD,
-            font=("TkFixedFont", 10),
-        )
-        self.log.pack(fill=tk.BOTH, expand=True)
-
-        footer = ttk.Frame(outer)
-        footer.pack(fill=tk.X)
-        ttk.Label(footer, textvariable=self.summary_var).pack(side=tk.LEFT)
-        self.progress = ttk.Progressbar(footer, mode="determinate", length=160)
-        self.progress.pack(side=tk.RIGHT, padx=(8, 0))
-        ttk.Label(footer, textvariable=self.activity_var).pack(side=tk.RIGHT)
-
-    def _load_repositories(self) -> None:
-        try:
-            paths = load_repositories()
-        except (OSError, ValueError) as exc:
-            self._write_log(f"Konfiguration konnte nicht geladen werden: {exc}")
-            messagebox.showwarning(
-                "Konfiguration", f"Die Konfiguration ist nicht lesbar:\n{exc}\n\n{default_config_path()}",
-            )
+    def do_activate(self) -> None:
+        if self.window is not None:
+            self.window.present()
             return
-        for path in paths:
-            self._add_repository(path, persist=False)
+
+        display = Gdk.Display.get_default()
+        if display is not None:
+            provider = Gtk.CssProvider()
+            provider.load_from_data(CSS.encode("utf-8"))
+            Gtk.StyleContext.add_provider_for_display(
+                display, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
+            )
+
+        self.window = Adw.ApplicationWindow(application=self)
+        self.window.set_title("GitTool")
+        self.window.set_default_size(1160, 760)
+        self.window.connect("close-request", self._on_close_request)
+
+        self.toasts = Adw.ToastOverlay()
+        self.window.set_content(self.toasts)
+        main = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self.toasts.set_child(main)
+
+        bar = Adw.HeaderBar()
+        bar.set_title_widget(Adw.WindowTitle.new("GitTool", "Repository-Status und sicherer Pull"))
+        main.append(bar)
+
+        add_button = Gtk.Button(icon_name="list-add-symbolic", tooltip_text="Git-Repository hinzufügen")
+        add_button.connect("clicked", lambda *_: self._choose_folder(scan=False))
+        bar.pack_start(add_button)
+        scan_button = Gtk.Button(icon_name="folder-saved-search-symbolic",
+                                 tooltip_text="Verzeichnisbaum nach Repositories durchsuchen")
+        scan_button.connect("clicked", lambda *_: self._choose_folder(scan=True))
+        bar.pack_start(scan_button)
+        self.buttons.extend([add_button, scan_button])
+
+        self.all_check = Gtk.Button(label="Alle prüfen")
+        self.all_check.connect("clicked", lambda *_: self._start("check", self.repositories[:]))
+        bar.pack_end(self.all_check)
+        self.buttons.append(self.all_check)
+
+        self.all_pull = Gtk.Button(label="Alle prüfen + Pull")
+        self.all_pull.add_css_class("suggested-action")
+        self.all_pull.connect("clicked", lambda *_: self._start("pull", self.repositories[:]))
+        bar.pack_end(self.all_pull)
+        self.buttons.append(self.all_pull)
+
+        body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        body.set_margin_top(16)
+        body.set_margin_bottom(14)
+        body.set_margin_start(20)
+        body.set_margin_end(20)
+        main.append(body)
+
+        intro = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        intro.set_valign(Gtk.Align.CENTER)
+        self.summary = Gtk.Label(label="0 Repositories", xalign=0)
+        self.summary.add_css_class("title-3")
+        self.summary.set_hexpand(True)
+        intro.append(self.summary)
+        self.search = Gtk.SearchEntry(placeholder_text="Repository, Pfad oder Status suchen")
+        self.search.set_width_chars(31)
+        self.search.connect("search-changed", lambda *_: self.listbox.invalidate_filter())
+        intro.append(self.search)
+        body.append(intro)
+
+        pathline = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.path_entry = Gtk.Entry(placeholder_text="Lokalen Repository-Pfad eingeben …")
+        self.path_entry.set_hexpand(True)
+        self.path_entry.connect("activate", lambda *_: self._add_entered_path())
+        pathline.append(self.path_entry)
+        path_button = Gtk.Button(label="Pfad hinzufügen")
+        path_button.connect("clicked", lambda *_: self._add_entered_path())
+        self.buttons.append(path_button)
+        pathline.append(path_button)
+        body.append(pathline)
+
+        options = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        for label, callback in (
+            ("Auswahl prüfen", lambda: self._start("check", self._selected_paths())),
+            ("Auswahl: prüfen + Pull", lambda: self._start("pull", self._selected_paths())),
+            ("Auswahl entfernen", self._remove_selected),
+        ):
+            button = Gtk.Button(label=label)
+            button.connect("clicked", lambda _b, run=callback: run())
+            options.append(button)
+            self.buttons.append(button)
+        self.select_button = Gtk.Button(label="Alle auswählen")
+        self.select_button.connect("clicked", lambda *_: self._toggle_selection())
+        options.append(self.select_button)
+        self.buttons.append(self.select_button)
+        body.append(options)
+
+        legend = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=14)
+        for status in ("Aktuell", "Pull möglich", "Lokale Änderungen", "Divergiert"):
+            title, css, icon = visual_status(status)
+            dot = Gtk.Image.new_from_icon_name(icon)
+            dot.add_css_class("pill-" + css)
+            legend.append(dot)
+            caption = Gtk.Label(label=title)
+            caption.add_css_class("dim-label")
+            legend.append(caption)
+        body.append(legend)
+
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_hexpand(True)
+        scroll.set_vexpand(True)
+        scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        self.listbox = Gtk.ListBox()
+        self.listbox.add_css_class("boxed-list")
+        self.listbox.add_css_class("repo-list")
+        self.listbox.set_selection_mode(Gtk.SelectionMode.NONE)
+        self.listbox.set_filter_func(self._filter_row)
+        empty = Adw.StatusPage(
+            title="Noch keine Repositories",
+            description="Über „+“ einen Repository-Ordner wählen oder einen ganzen Verzeichnisbaum durchsuchen.",
+            icon_name="folder-symbolic",
+        )
+        empty.set_vexpand(True)
+        self.listbox.set_placeholder(empty)
+        scroll.set_child(self.listbox)
+        body.append(scroll)
+
+        bottom = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        self.progress = Gtk.ProgressBar()
+        self.progress.set_hexpand(True)
+        self.progress.set_show_text(True)
+        self.progress.set_text("Bereit")
+        bottom.append(self.progress)
+        body.append(bottom)
+
+        expander = Gtk.Expander(label="Protokoll")
+        expander.set_expanded(True)
+        body.append(expander)
+        log_scroll = Gtk.ScrolledWindow()
+        log_scroll.set_min_content_height(132)
+        log_scroll.set_max_content_height(200)
+        log_scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        self.logview = Gtk.TextView()
+        self.logview.set_editable(False)
+        self.logview.set_cursor_visible(False)
+        self.logview.set_monospace(True)
+        self.logview.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        self.logview.set_top_margin(6)
+        self.logview.set_left_margin(8)
+        self.logview.set_right_margin(8)
+        log_scroll.set_child(self.logview)
+        expander.set_child(log_scroll)
+
+        self._load_saved()
         self._update_summary()
-        self._write_log(f"{len(self.repositories)} Repository(s) geladen.")
+        self.window.present()
 
-    def _persist(self) -> None:
-        try:
-            save_repositories(self.repositories)
-        except OSError as exc:
-            messagebox.showerror("Speichern fehlgeschlagen", str(exc))
-            self._write_log(f"Konfiguration konnte nicht gespeichert werden: {exc}")
+    def _filter_row(self, row: Gtk.ListBoxRow) -> bool:
+        query = self.search.get_text().strip().casefold()
+        if not query:
+            return True
+        path = str(row.get_name())
+        state = self.states.get(path)
+        haystack = " ".join((
+            path,
+            state.branch if state else "",
+            state.upstream if state else "",
+            state.status if state else "",
+        )).casefold()
+        return query in haystack
 
-    def _add_repository(self, path: Path, *, persist: bool = True) -> bool:
+    def _register_repository(self, path: Path, *, persist: bool = True) -> bool:
         path = path.expanduser().resolve()
         key = os.path.normcase(str(path))
-        if any(os.path.normcase(str(p)) == key for p in self.repositories):
+        if any(os.path.normcase(str(old)) == key for old in self.repositories):
             return False
+
+        row = Adw.ActionRow(title=path.name, subtitle=str(path))
+        row.set_name(str(path))
+        row.set_tooltip_text(str(path))
+        checkbox = Gtk.CheckButton()
+        checkbox.set_tooltip_text("Repository für Aktionen auswählen")
+        row.add_prefix(checkbox)
+
+        indicator = Gtk.Box()
+        indicator.add_css_class("repo-indicator")
+        indicator.add_css_class("indicator-muted")
+        row.add_prefix(indicator)
+
+        details = Gtk.Label(label="Branch: –     Upstream: –     ↑ 0   ↓ 0")
+        details.add_css_class("dim-label")
+        details.add_css_class("git-details")
+        details.set_ellipsize(3)  # Pango.EllipsizeMode.END
+        details.set_max_width_chars(60)
+        details.set_tooltip_text("Noch nicht geprüft")
+        row.add_suffix(details)
+
+        badge = Gtk.Label(label="Nicht geprüft")
+        badge.add_css_class("status-pill")
+        badge.add_css_class("pill-muted")
+        row.add_suffix(badge)
+
+        self.listbox.append(row)
         self.repositories.append(path)
-        self.tree.insert(
-            "", tk.END, iid=str(path),
-            values=(path.name, "–", "–", "–", "–", "–", "Nicht geprüft", str(path)),
-        )
+        self.widgets[str(path)] = (row, checkbox, indicator, details, badge)
         if persist:
-            self._persist()
+            self._save()
         self._update_summary()
         return True
 
-    def _add_typed(self) -> None:
-        raw = self.path_var.get().strip().strip('"')
-        if not raw:
-            messagebox.showinfo("Repository hinzufügen", "Bitte einen lokalen Verzeichnispfad eingeben.")
+    def _set_status(self, path: Path, status: str, detail: str,
+                    state: RepositoryState | None = None) -> None:
+        key = str(path)
+        if key not in self.widgets:
+            return
+        row, checkbox, indicator, details, badge = self.widgets[key]
+        for color in ("ok", "info", "warn", "error", "muted"):
+            badge.remove_css_class("pill-" + color)
+            indicator.remove_css_class("indicator-" + color)
+        label, color, _icon = visual_status(status)
+        badge.set_text(label)
+        badge.add_css_class("pill-" + color)
+        indicator.add_css_class("indicator-" + color)
+        row.set_tooltip_text(detail or key)
+        if state is not None:
+            self.states[key] = state
+            branch = state.branch or "–"
+            upstream = state.upstream or "–"
+            details.set_text(f"{branch}  →  {upstream}    ↑ {state.ahead}   ↓ {state.behind}"
+                             + ("    ● lokal geändert" if state.dirty else ""))
+            details.set_tooltip_text(
+                f"Branch: {branch}\nUpstream: {upstream}\nAhead: {state.ahead} / Behind: {state.behind}\n{detail}"
+            )
+            self.errors.pop(key, None)
+        elif status == "Fehler":
+            self.errors[key] = detail
+        self.listbox.invalidate_filter()
+        self._update_summary()
+
+    def _add_entered_path(self) -> None:
+        value = self.path_entry.get_text().strip().strip('"')
+        if not value:
+            self._toast("Bitte einen Repository-Pfad eingeben.")
             return
         try:
-            path = normalize_repository(raw)
+            path = normalize_repository(value)
         except (GitToolError, OSError) as exc:
-            messagebox.showerror("Kein Repository", str(exc))
+            self._toast(str(exc))
+            self._log(f"FEHLER: {exc}")
             return
-        if self._add_repository(path):
-            self._write_log(f"Hinzugefügt: {path}")
-        self.path_var.set("")
+        if self._register_repository(path):
+            self._log(f"Hinzugefügt: {path}")
+        else:
+            self._toast("Repository bereits vorhanden.")
+        self.path_entry.set_text("")
 
-    def _browse_add(self) -> None:
-        directory = filedialog.askdirectory(title="Git-Repository-Stammordner auswählen")
-        if directory:
-            self.path_var.set(directory)
-            self._add_typed()
+    def _choose_folder(self, *, scan: bool) -> None:
+        dialog = Gtk.FileDialog()
+        dialog.set_title(
+            "Übergeordneten Ordner durchsuchen" if scan else "Git-Repository auswählen"
+        )
 
-    def _scan_folder(self) -> None:
-        root = filedialog.askdirectory(title="Übergeordneten Ordner nach Repositories durchsuchen")
-        if not root:
-            return
-        self._start_job("scan", [Path(root)])
+        def chosen(dlg: Gtk.FileDialog, result: Gio.AsyncResult) -> None:
+            try:
+                folder = dlg.select_folder_finish(result)
+            except GLib.Error as exc:
+                if not exc.matches(Gtk.DialogError.quark(), Gtk.DialogError.DISMISSED):
+                    self._toast(str(exc))
+                return
+            if folder is None or folder.get_path() is None:
+                self._toast("Nur lokale Ordner werden unterstützt.")
+                return
+            path = Path(folder.get_path())
+            if scan:
+                self._start("scan", [path])
+            else:
+                try:
+                    normalized = normalize_repository(path)
+                    if self._register_repository(normalized):
+                        self._log(f"Hinzugefügt: {normalized}")
+                    else:
+                        self._toast("Repository bereits vorhanden.")
+                except (GitToolError, OSError) as exc:
+                    self._toast(str(exc))
 
-    def _selected(self) -> list[Path]:
-        return [Path(iid) for iid in self.tree.selection()]
+        dialog.select_folder(self.window, None, chosen)
+
+    def _selected_paths(self) -> list[Path]:
+        return [
+            path for path in self.repositories
+            if self.widgets[str(path)][1].get_active()
+        ]
+
+    def _toggle_selection(self) -> None:
+        all_selected = bool(self.repositories) and all(
+            self.widgets[str(path)][1].get_active() for path in self.repositories
+        )
+        for path in self.repositories:
+            self.widgets[str(path)][1].set_active(not all_selected)
+        self.select_button.set_label("Alle auswählen" if all_selected else "Auswahl aufheben")
 
     def _remove_selected(self) -> None:
-        selected = set(self.tree.selection())
+        selected = self._selected_paths()
         if not selected:
-            messagebox.showinfo("Auswahl", "Bitte mindestens ein Repository auswählen.")
+            self._toast("Bitte zuerst Repositories auswählen.")
             return
-        self.repositories = [p for p in self.repositories if str(p) not in selected]
-        for iid in selected:
-            self.tree.delete(iid)
-            self.states.pop(iid, None)
-        self._persist()
+        for path in selected:
+            key = str(path)
+            self.listbox.remove(self.widgets[key][0])
+            self.widgets.pop(key)
+            self.states.pop(key, None)
+            self.errors.pop(key, None)
+        selected_set = set(selected)
+        self.repositories = [p for p in self.repositories if p not in selected_set]
+        self._save()
+        self._log(f"{len(selected)} Repository(s) aus der Liste entfernt – keine Dateien gelöscht.")
         self._update_summary()
-        self._write_log(f"{len(selected)} Repository(s) aus der Liste entfernt (keine Dateien gelöscht).")
 
-    def _operate(self, operation: str, selected_only: bool) -> None:
-        paths = self._selected() if selected_only else list(self.repositories)
-        if not paths:
-            messagebox.showinfo(
-                "Keine Repositories",
-                "Bitte Repositories hinzufügen bzw. Zeilen auswählen.",
-            )
+    def _save(self) -> None:
+        try:
+            save_repositories(self.repositories)
+        except OSError as exc:
+            self._toast(f"Speichern fehlgeschlagen: {exc}")
+            self._log(f"FEHLER beim Speichern: {exc}")
+
+    def _load_saved(self) -> None:
+        try:
+            paths = load_repositories()
+        except (OSError, ValueError) as exc:
+            self._toast(f"Konfiguration kann nicht gelesen werden: {exc}")
+            self._log(f"FEHLER: {exc} ({default_config_path()})")
             return
-        self._start_job(operation, paths)
+        for path in paths:
+            self._register_repository(path, persist=False)
+        self._log(f"{len(self.repositories)} Repository(s) geladen.")
 
-    def _start_job(self, operation: str, paths: list[Path]) -> None:
+    def _start(self, operation: str, paths: list[Path]) -> None:
         if self.busy:
             return
+        if not paths:
+            self._toast("Bitte mindestens ein Repository hinzufügen oder auswählen.")
+            return
         self.busy = True
-        self._total = len(paths)
-        self._finished = 0
-        self.progress.configure(maximum=self._total, value=0)
+        self.processed = 0
+        self.total = len(paths)
+        self.progress.set_fraction(0)
+        self.progress.set_text(f"0 / {self.total}")
         for button in self.buttons:
-            button.configure(state=tk.DISABLED)
-        label = {"scan": "Suche", "check": "Statusprüfung", "pull": "Prüfen + Pull"}[operation]
-        self.activity_var.set(f"{label}: 0/{self._total}")
-        self._write_log(f"--- {label} gestartet ({self._total}) ---")
+            button.set_sensitive(False)
+        self.path_entry.set_sensitive(False)
+        self._log(f"--- {operation}: {self.total} Verzeichnis(se) ---")
         try:
-            self.executor.submit(self._worker, operation, paths)
+            self.executor.submit(self._work, operation, paths)
         except RuntimeError as exc:
-            self.events.put(("error", paths[0], str(exc)))
-            self.events.put(("done", operation))
+            self._event("error", (paths[0], str(exc)))
+            self._event("done", None)
 
-    def _worker(self, operation: str, paths: list[Path]) -> None:
+    def _work(self, operation: str, paths: list[Path]) -> None:
         try:
             if operation == "scan":
                 try:
-                    found = discover_repositories(paths[0])
-                    self.events.put(("scan", found))
+                    self._emit("scan", discover_repositories(paths[0]))
                 except Exception as exc:
-                    self.events.put(("error", paths[0], str(exc)))
-                return
-
-            for path in paths:
-                try:
-                    if operation == "check":
-                        state = inspect_repository(path, fetch=True)
-                        self.events.put(("state", state))
-                    else:
-                        outcome = pull_repository(path)
-                        self.events.put(("outcome", outcome))
-                except Exception as exc:
-                    self.events.put(("error", path, str(exc)))
+                    self._emit("error", (paths[0], str(exc)))
+            else:
+                for path in paths:
+                    try:
+                        if operation == "check":
+                            self._emit("status", inspect_repository(path, fetch=True))
+                        else:
+                            self._emit("pull", pull_repository(path))
+                    except Exception as exc:
+                        self._emit("error", (path, str(exc)))
         finally:
-            self.events.put(("done", operation))
+            self._emit("done", None)
 
-    def _drain_events(self) -> None:
-        try:
-            while True:
-                event = self.events.get_nowait()
-                kind = event[0]
-                if kind == "state":
-                    state = event[1]
-                    self._show_state(state)
-                    self._write_log(f"{state.name}: {state.status} – {state.detail}")
-                    self._advance()
-                elif kind == "outcome":
-                    outcome: PullOutcome = event[1]
-                    self._show_state(outcome.state)
-                    detail = outcome.message.replace("\r", "")
-                    self._write_log(f"{outcome.state.name}: {outcome.action}\n{detail}")
-                    self._advance()
-                elif kind == "error":
-                    path, detail = event[1:]
-                    if self.tree.exists(str(path)):
-                        current = list(self.tree.item(str(path), "values"))
-                        current[6] = "Fehler"
-                        self.tree.item(str(path), values=current, tags=("error",))
-                    self._write_log(f"FEHLER {path}: {detail}")
-                    self._advance()
-                elif kind == "scan":
-                    found: list[Path] = event[1]
-                    count = sum(self._add_repository(path, persist=False) for path in found)
-                    if count:
-                        self._persist()
-                    self._write_log(f"Suche abgeschlossen: {len(found)} gefunden, {count} neu hinzugefügt.")
-                    self._advance()
-                elif kind == "done":
-                    self.busy = False
-                    for button in self.buttons:
-                        button.configure(state=tk.NORMAL)
-                    self.activity_var.set("Bereit")
-                    self._write_log("--- Abgeschlossen ---")
-        except Empty:
-            pass
-        if self.winfo_exists():
-            self.after(100, self._drain_events)
+    def _emit(self, kind: str, payload: object) -> None:
+        GLib.idle_add(self._event, kind, payload)
+
+    def _event(self, kind: str, payload: object) -> bool:
+        if self.closing:
+            return False
+        if kind == "status":
+            state: RepositoryState = payload
+            self._set_status(state.path, state.status, state.detail, state)
+            self._log(f"{state.name}: {state.status} – {state.detail}")
+            self._advance()
+        elif kind == "pull":
+            outcome: PullOutcome = payload
+            self._set_status(
+                outcome.state.path, outcome.state.status,
+                outcome.state.detail, outcome.state,
+            )
+            self._log(f"{outcome.state.name}: {outcome.action}\n{outcome.message}")
+            self._advance()
+        elif kind == "error":
+            path, detail = payload
+            self._set_status(path, "Fehler", detail)
+            self._log(f"FEHLER {path}: {detail}")
+            self._advance()
+        elif kind == "scan":
+            discovered = payload
+            count = sum(self._register_repository(path, persist=False) for path in discovered)
+            if count:
+                self._save()
+            self._log(f"Suche: {len(discovered)} gefunden, {count} neu aufgenommen.")
+            self._toast(f"{count} Repository(s) hinzugefügt.")
+            self._advance()
+        elif kind == "done":
+            self.busy = False
+            for button in self.buttons:
+                button.set_sensitive(True)
+            self.path_entry.set_sensitive(True)
+            self.progress.set_text("Abgeschlossen")
+            self._log("--- Fertig ---")
+        return False
 
     def _advance(self) -> None:
-        self._finished += 1
-        self.progress.configure(value=self._finished)
-        self.activity_var.set(f"Fortschritt: {self._finished}/{self._total}")
-
-    def _show_state(self, state: RepositoryState) -> None:
-        key = str(state.path)
-        if not self.tree.exists(key):
-            return
-        self.states[key] = state
-        if state.status == "Aktuell":
-            tag = "ok"
-        elif state.status == "Pull möglich":
-            tag = "ready"
-        elif state.status in ("Divergiert", "Detached HEAD", "Kein Upstream", "Kein Remote"):
-            tag = "error"
-        else:
-            tag = "warning"
-        self.tree.item(
-            key,
-            values=(
-                state.name, state.branch or "–", state.upstream or "–",
-                "Geändert" if state.dirty else "Sauber",
-                state.ahead, state.behind, state.status, str(state.path),
-            ),
-            tags=(tag,),
-        )
-        self._update_summary()
+        self.processed += 1
+        self.progress.set_fraction(self.processed / max(self.total, 1))
+        self.progress.set_text(f"{self.processed} / {self.total}")
 
     def _update_summary(self) -> None:
-        checked = len(self.states)
-        self.summary_var.set(f"{len(self.repositories)} Repositories · {checked} geprüft")
+        current = sum(s.status == "Aktuell" for s in self.states.values())
+        pullable = sum(s.status == "Pull möglich" for s in self.states.values())
+        warnings = sum(s.status in ("Lokale Änderungen", "Nur lokal voraus") for s in self.states.values())
+        errors = sum(s.status in ("Divergiert", "Detached HEAD", "Kein Upstream", "Kein Remote")
+                     for s in self.states.values()) + len(self.errors)
+        self.summary.set_text(
+            f"{len(self.repositories)} Repositories   ·   {current} aktuell   ·   "
+            f"{pullable} Pull möglich   ·   {warnings} lokal   ·   {errors} blockiert"
+        )
 
-    def _write_log(self, message: str) -> None:
+    def _log(self, message: str) -> None:
+        buffer = self.logview.get_buffer()
         stamp = datetime.now().strftime("%H:%M:%S")
-        self.log.configure(state=tk.NORMAL)
-        self.log.insert(tk.END, f"[{stamp}] {message}\n")
-        self.log.see(tk.END)
-        self.log.configure(state=tk.DISABLED)
+        buffer.insert(buffer.get_end_iter(), f"[{stamp}] {message}\n")
 
-    def _close(self) -> None:
+    def _toast(self, message: str) -> None:
+        self.toasts.add_toast(Adw.Toast.new(message))
+
+    def _on_close_request(self, _window: Adw.ApplicationWindow) -> bool:
         if self.busy:
-            messagebox.showwarning(
-                "Git-Operation läuft", "Die Git-Operation läuft noch. Bitte vor dem Beenden abschließen lassen.",
-            )
-            return
+            self._toast("Git-Vorgang läuft noch. Vor dem Schließen bitte abschließen lassen.")
+            return True
+        self.closing = True
         self.executor.shutdown(wait=False, cancel_futures=True)
-        self.destroy()
+        return False
 
 
-def main() -> None:
-    app = GitToolApp()
-    app.mainloop()
+def main() -> int:
+    """Installed 'gittool' launcher and 'python -m gittool' entrypoint."""
+    return GitToolApp().run(sys.argv)
