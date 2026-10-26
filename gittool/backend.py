@@ -230,3 +230,42 @@ def pull_repository(value: str | Path) -> PullOutcome:
             "Bereits aktuell." if result.already_up_to_date else "Fast-forward erfolgreich."
         )
         return PullOutcome(after, action, message.strip())
+
+
+def discover_submodules(root: str | Path) -> list[tuple[Path, Path]]:
+    """Discover initialized Git submodules, preserving their direct parent.
+
+    Git's index has mode 160000 for gitlinks, even if no .gitmodules exists.
+    A submodule is included only if its worktree is initialized and its own
+    repository root can be verified. Never execute submodule init/update.
+    """
+    root = normalize_repository(root)
+    found: list[tuple[Path, Path]] = []
+    visited: set[Path] = {root}
+
+    def descend(parent: Path) -> None:
+        result = _git(parent, "ls-files", "--stage", "-z")
+        for record in result.stdout.split("\0"):
+            if not record or "\t" not in record:
+                continue
+            meta, relative = record.split("\t", 1)
+            fields = meta.split()
+            if len(fields) != 3 or fields[0] != "160000" or fields[2] != "0":
+                continue
+            candidate = (parent / relative).resolve()
+            if candidate in visited or not candidate.is_relative_to(parent):
+                continue
+            if not candidate.is_dir() or not (
+                (candidate / ".git").is_file() or (candidate / ".git").is_dir()
+            ):
+                continue  # Uninitialized gitlink: do not clone or change disk contents.
+            try:
+                validated = normalize_repository(candidate)
+            except GitToolError:
+                continue
+            visited.add(validated)
+            found.append((validated, parent))
+            descend(validated)
+
+    descend(root)
+    return found
