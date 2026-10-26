@@ -4,6 +4,7 @@ from __future__ import annotations
 import ast
 import os
 from pathlib import Path
+import tempfile
 import unittest
 
 from gittool.status_style import visual_status
@@ -52,6 +53,7 @@ class StatusColorTests(unittest.TestCase):
             gi.require_version("Adw", "1")
             from gi.repository import Gtk
             from gittool.app import GitToolApp
+            from gittool.backend import RepositoryState
         except (ImportError, ValueError) as exc:
             self.skipTest(f"GTK-Bindings nicht installiert: {exc}")
 
@@ -63,6 +65,22 @@ class StatusColorTests(unittest.TestCase):
             self.assertIsInstance(application.window, Gtk.Window)
             self.assertTrue(application.listbox is not None)
             self.assertIsNotNone(application.all_pull)
+            with tempfile.TemporaryDirectory() as temporary:
+                path = Path(temporary).resolve()
+                self.assertTrue(application._register_repository(path, persist=False))
+                state = RepositoryState(
+                    path=path, branch="gpt", upstream="origin/gpt",
+                    behind=2, status="Pull möglich", can_pull=True,
+                )
+                application._set_status(path, "Pull möglich", "2 Commits", state)
+                _row, check, indicator, details, badge = application.widgets[str(path)]
+                self.assertTrue(badge.has_css_class("pill-info"))
+                self.assertTrue(indicator.has_css_class("indicator-info"))
+                self.assertIn("origin/gpt", details.get_text())
+                check.set_active(True)
+                self.assertEqual(application._selected_paths(), [path])
+                application.search.set_text("gpt")
+                application.listbox.invalidate_filter()
         finally:
             if application.window is not None:
                 application.window.close()
