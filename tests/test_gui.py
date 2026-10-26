@@ -81,6 +81,20 @@ class StatusColorTests(unittest.TestCase):
                 self.assertEqual(application._selected_paths(), [path])
                 application.search.set_text("gpt")
                 application.listbox.invalidate_filter()
+                application.search.set_text("")
+                second = path.parent / (path.name + "-other")
+                child = path / "sub" / "nested"
+                from unittest.mock import patch
+                with patch("gittool.app.discover_submodules", return_value=[]):
+                    application._register_repository(second, persist=False)
+                with patch("gittool.app.discover_submodules", return_value=[(child, path)]):
+                    application._register_repository(path, persist=False)
+                self.assertEqual(application.repositories, [path, child, second])
+                self.assertEqual(application.catalog.find(child).parent, path)
+                self.assertIn("Submodul", application.widgets[str(child)][0].get_subtitle())
+                with patch("gittool.app.save_repository_entries"):
+                    application._move_selected(1)
+                self.assertEqual(application.repositories, [second, path, child])
         finally:
             if application.window is not None:
                 application.window.close()
