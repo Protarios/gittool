@@ -156,12 +156,12 @@ class RepositoryTests(unittest.TestCase):
             normalize_repository(self.clone / "missing")
 
     def test_scanner_finds_normal_repository(self) -> None:
-        self.assertIn(self.clone, discover_repositories(self.clone.parent))
+        self.assertIn(self.clone.resolve(), discover_repositories(self.clone.parent))
 
     def test_saved_list(self) -> None:
         path = self.clone.parent / "config" / "repositories.json"
         save_repositories([self.clone], path)
-        self.assertEqual(load_repositories(path), [self.clone])
+        self.assertEqual(load_repositories(path), [self.clone.resolve()])
 
 
 if __name__ == "__main__":
