@@ -29,6 +29,31 @@ wie der DAR Explorer auf PyGObject / GTK 4.
 - Gespeicherte Repository-Pfade werden aus der vorherigen Tkinter-Version
   unverändert übernommen.
 
+## Reihenfolge und Submodule
+
+Die Repository-Liste speichert jetzt eine **manuell festgelegte Reihenfolge**.
+Mit **↑ Nach oben** und **↓ Nach unten** verschiebst du das ausgewählte
+Repository um eine Position zwischen seinen Geschwistern. Ein Hauptrepository
+nimmt dabei alle untergeordneten Submodule mit. Das Verschieben erfolgt
+auch bei einem Neustart in derselben Reihenfolge.
+
+Beim **Hinzufügen** eines Repositories (auch über die Ordnersuche) und
+beim **Laden der gespeicherten Liste** erkennt GitTool die *initialisierten*
+Git-Submodule über die Gitlinks des Git-Index, rekursiv einschließlich
+verschachtelter Submodule. Diese erhalten einen expliziten Parent und
+werden unter dem jeweiligen Hauptrepository angezeigt.
+Submodule mit noch nicht ausgechecktem Worktree werden **nicht** automatisch
+geklont oder initialisiert; dazu muss zunächst manuell
+`git submodule update --init --recursive` ausgeführt werden.
+Ein Submodul in **detached HEAD** wird zwar angezeigt und geprüft,
+aber nicht automatisch gepullt.
+
+Die Repository-Liste wird im rückwärtskompatiblen JSON-Format Version 2
+gespeichert: `repositories` enthält Pfad- und Parent-Einträge in Reihenfolge.
+Dateien älterer Version 1 werden ohne Verlust der Reihenfolge übernommen.
+**Entfernen** eines Hauptrepositories löscht auch die zugehörigen Submodule
+aus der *Liste*, niemals von der Festplatte.
+
 ## Installation unter Linux
 
 Voraussetzungen: **Python 3.13+**, Git, GTK **4.10+**, libadwaita und
