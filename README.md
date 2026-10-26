@@ -16,10 +16,10 @@ zwischen den Versionen auf demselben Rechner bleibt die Repository-Liste erhalte
 
 - **Windows 10/11 oder Linux** (64 Bit).
 - **Python 3.13 oder 3.14**, mit pip und venv.
-- Git for Windows; \`git.exe\` muss über \`PATH\` erreichbar sein.
+- Git for Windows; `git.exe` muss über `PATH` erreichbar sein.
 - Netzwerkzugang und Git-Anmeldedaten/SSH-Schlüssel für Remote-Repositories.
 
-GTK und \`python-gobject\` sind **nicht erforderlich**. PySide6 wird inklusive
+GTK und `python-gobject` sind **nicht erforderlich**. PySide6 wird inklusive
 Qt-Bibliotheken per pip installiert.
 
 ## Installation unter Windows (PowerShell)
@@ -33,7 +33,7 @@ python -m pip install -e .
 gittool
 ~~~
 
-Ist Python 3.13 installiert, ersetze \`py -3.14\` durch \`py -3.13\`.
+Ist Python 3.13 installiert, ersetze `py -3.14` durch `py -3.13`.
 
 **Bereits geklontes GitTool aktualisieren:**
 
@@ -44,7 +44,7 @@ python -m pip install -e .
 gittool
 ~~~
 
-Wenn du einen lokalen Branch \`windows\` schon hast, verwende stattdessen:
+Wenn du einen lokalen Branch `windows` schon hast, verwende stattdessen:
 
 ~~~powershell
 git switch windows
@@ -53,9 +53,9 @@ python -m pip install -e .
 gittool
 ~~~
 
-Du kannst alternativ \`python -m gittool\` verwenden.
+Du kannst alternativ `python -m gittool` verwenden.
 Ein erneuter pip-Aufruf ist nur nötig, wenn sich Python-Abhängigkeiten ändern.
-Ein Paket, das mit \`pip install -e .\` installiert wurde, verwendet sonst
+Ein Paket, das mit `pip install -e .` installiert wurde, verwendet sonst
 direkt die ausgecheckten Python-Quelldateien.
 
 ## Installation unter Linux
@@ -89,15 +89,40 @@ zu setzen oder `gi` zu installieren.
 Die automatisierten GUI- und Backend-Tests laufen für **Linux und Windows**
 mit **Python 3.13 und 3.14** (Qt unter Linux im Headless-Modus).
 
+## Reihenfolge und Submodule
+
+Die Repository-Liste speichert jetzt eine **manuell festgelegte Reihenfolge**.
+Mit **↑ Nach oben** und **↓ Nach unten** verschiebst du das ausgewählte
+Repository um eine Position zwischen seinen Geschwistern. Ein Hauptrepository
+nimmt dabei alle untergeordneten Submodule mit. Das Verschieben erfolgt
+auch bei einem Neustart in derselben Reihenfolge.
+
+Beim **Hinzufügen** eines Repositories (auch über die Ordnersuche) und
+beim **Laden der gespeicherten Liste** erkennt GitTool die *initialisierten*
+Git-Submodule über die Gitlinks des Git-Index, rekursiv einschließlich
+verschachtelter Submodule. Diese erhalten einen expliziten Parent und
+werden unter dem jeweiligen Hauptrepository angezeigt.
+Submodule mit noch nicht ausgechecktem Worktree werden **nicht** automatisch
+geklont oder initialisiert; dazu muss zunächst manuell
+`git submodule update --init --recursive` ausgeführt werden.
+Ein Submodul in **detached HEAD** wird zwar angezeigt und geprüft,
+aber nicht automatisch gepullt.
+
+Die Repository-Liste wird im rückwärtskompatiblen JSON-Format Version 2
+gespeichert: `repositories` enthält Pfad- und Parent-Einträge in Reihenfolge.
+Dateien älterer Version 1 werden ohne Verlust der Reihenfolge übernommen.
+**Entfernen** eines Hauptrepositories löscht auch die zugehörigen Submodule
+aus der *Liste*, niemals von der Festplatte.
+
 ## Funktionalität
 
 - Git-Repository über Dialog oder eingegebenen Pfad hinzufügen;
   übergeordneten Ordner rekursiv durchsuchen, inklusive Worktrees.
-- Lokale Repository-Liste dauerhaft speichern.
+- Repository-Hierarchie und manuelle Reihenfolge dauerhaft speichern.
 - Ausgewählte oder alle Repositories auf Remote-Änderungen prüfen.
 - Ausgewählte oder alle Repositories prüfen und sicher aktualisieren.
 - Repository-Tabelle mit Branch, Upstream, geändert/sauber, Ahead, Behind,
-  Status und Pfad; Spaltensortierung, Mehrfachauswahl und Suche.
+  Status und Pfad; hierarchische Darstellung, Mehrfachauswahl und Suche.
 - Farbcodierung (jeweils zusätzlich ein Klartext-Status):
   - **Grün:** aktuell
   - **Blau:** Pull möglich
@@ -107,17 +132,17 @@ mit **Python 3.13 und 3.14** (Qt unter Linux im Headless-Modus).
 - Protokoll und Fortschrittsanzeige; Git-Vorgänge laufen im Hintergrund,
   damit die Oberfläche bedienbar bleibt.
 
-Die Statusprüfung nutzt \`git fetch\`, Gittyup und Git-Plumbing.
+Die Statusprüfung nutzt `git fetch`, Gittyup und Git-Plumbing.
 Der Pull wird durch
-\`gittyup.git_operations.pull_repository_detailed()\` ausgeführt,
+`gittyup.git_operations.pull_repository_detailed()` ausgeführt,
 aber nur bei sauberem Arbeitsverzeichnis, eingerichtetem Upstream,
-\`ahead=0\` und \`behind>0\`. Für den Kindprozess erzwingt GitTool
-\`pull.ff=only\`. Lokale Änderungen, divergierte Branches oder
+`ahead=0` und `behind>0`. Für den Kindprozess erzwingt GitTool
+`pull.ff=only`. Lokale Änderungen, divergierte Branches oder
 detached HEAD werden **nicht** automatisch gemergt, verworfen,
 rebased oder gestasht. Git-LFS und Hooks laufen wie bei normalem Git.
 
 Die Konfiguration enthält nur Pfade und wird unter
-\`platformdirs.user_config_path("gittool", "Protarios")/repositories.json\`
+`platformdirs.user_config_path("gittool", "Protarios")/repositories.json`
 gespeichert.
 
 ## Tests
@@ -134,8 +159,8 @@ die Offline-Git-Tests mit echten lokalen Test-Repositories.
 
 ## Projektstruktur
 
-- \`gittool/app.py\`: PySide6/Qt6-Fenster, farbige Tabelle und Worker-Events.
-- \`gittool/status_style.py\`: Status-Kategorien, gemeinsam mit GTK-Version.
-- \`gittool/backend.py\`: Gittyup-Backend und Fast-Forward-Sicherheitsprüfungen.
-- \`gittool/config.py\`: persistente Repository-Liste.
-- \`tests/\`: Backend- und GUI-Tests.
+- `gittool/app.py`: PySide6/Qt6-Fenster, farbige Tabelle und Worker-Events.
+- `gittool/status_style.py`: Status-Kategorien, gemeinsam mit GTK-Version.
+- `gittool/backend.py`: Gittyup-Backend und Fast-Forward-Sicherheitsprüfungen.
+- `gittool/config.py`: persistente Repository-Liste.
+- `tests/`: Backend- und GUI-Tests.
