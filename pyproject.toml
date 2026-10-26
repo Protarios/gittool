@@ -4,13 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "protarios-gittool"
-version = "0.2.0"
-description = "Modern GTK4/libadwaita GUI for gittyup repository status and safe pulls"
+version = "0.3.0"
+description = "Windows-ready PySide6/Qt6 gittyup GUI for safe Git repository pulls"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "gittyup>=1.2.0,<2",
     "platformdirs>=4.5",
+    "PySide6>=6.10,<7",
 ]
 
 [project.gui-scripts]

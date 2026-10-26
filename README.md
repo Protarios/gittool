@@ -1,147 +1,110 @@
-# GitTool
+# GitTool – Windows-Version (Qt 6)
 
-Moderne **GTK 4 + libadwaita**-Anwendung zur Statusprüfung und zum sicheren Aktualisieren
-mehrerer lokaler Git-Repositories unter Linux. Der Git-Backend verwendet die
-**Python-Bibliothek [gittyup](https://github.com/mikeckennedy/gittyup)**,
-nicht den gleichnamigen grafischen Git-Client.
+Dieser Branch stellt eine moderne, native **Windows-GUI mit PySide6/Qt 6**
+bereit. Sie verwendet wie die Linux-GTK-Version die Python-Bibliothek
+[gittyup](https://github.com/mikeckennedy/gittyup) von Michael Kennedy
+(nicht die gleichnamige Gittyup-GUI).
 
-GTK 5 ist derzeit nicht als stabile API verfügbar; das Projekt setzt
-wie der DAR Explorer auf PyGObject / GTK 4.
+**Branch-Übersicht:**
+- [windows](https://github.com/Protarios/gittool/tree/windows): Qt6/PySide6, Windows; ohne GTK, PyGObject oder MSYS2.
+- [gpt](https://github.com/Protarios/gittool/tree/gpt): GTK4/libadwaita für Linux.
 
-## Funktionen
+Die Git-Funktionen und das Konfigurationsformat sind identisch. Beim Wechsel
+zwischen den Versionen auf demselben Rechner bleibt die Repository-Liste erhalten.
 
-- Repository-Pfade eingeben, Ordner über den Dateidialog hinzufügen oder
-  ganze Verzeichnisbäume einschließlich Git-Worktrees durchsuchen.
-- Auswahl per Kontrollkästchen und Volltextsuche nach Repository, Pfad,
-  Branch, Upstream oder Status.
-- Statusprüfung per Fetch sowie Anzeige von Branch, Upstream, Ahead/Behind und
-  lokalen Änderungen.
-- **Auswahl prüfen**, **Alle prüfen**, **Auswahl prüfen + Pull** und
-  **Alle prüfen + Pull**, mit Fortschrittsanzeige und Protokoll.
-- **Farbcodierung über libadwaita-Themenfarben:** Grün = aktuell,
-  Blau = Pull möglich, Orange = lokale Änderungen / lokale Commits /
-  fehlender Upstream, Rot = divergiert, detached HEAD oder Git-Fehler,
-  Grau = ungeprüft. Die Zustände stehen zusätzlich als Klartext da
-  (auch ohne Farbwahrnehmung unterscheidbar).
-- Sichere Aktualisierung: Gittyup zieht nur über ein sauberes Arbeitsverzeichnis
-  mit Upstream und Fast-Forward. Divergenzen und uncommittete Änderungen
-  werden nicht automatisch gemergt oder verworfen.
-- Gespeicherte Repository-Pfade werden aus der vorherigen Tkinter-Version
-  unverändert übernommen.
+## Voraussetzungen
 
-## Installation unter Linux
+- **Windows 10/11** (64 Bit).
+- **Python 3.13 oder 3.14**, mit pip und venv.
+- Git for Windows; \`git.exe\` muss über \`PATH\` erreichbar sein.
+- Netzwerkzugang und Git-Anmeldedaten/SSH-Schlüssel für Remote-Repositories.
 
-Voraussetzungen: **Python 3.13+**, Git, GTK **4.10+**, libadwaita und
-PyGObject (Python-Modul `gi`).
+GTK und \`python-gobject\` sind **nicht erforderlich**. PySide6 wird inklusive
+Qt-Bibliotheken per pip installiert.
 
-**Arch Linux / CachyOS / EndeavourOS / Manjaro:**
+## Installation unter Windows (PowerShell)
 
-~~~bash
-sudo pacman -S --needed git python python-gobject gtk4 libadwaita
-~~~
-
-**Debian / Ubuntu (mit passender Python-Version):**
-
-~~~bash
-sudo apt install git python3-gi gir1.2-gtk-4.0 gir1.2-adw-1
-~~~
-
-Das Python-Paket `gittyup` benötigt **Python >= 3.13**. Falls die
-Distribution eine ältere System-Python-Version verwendet, muss eine
-separate Python-3.13+-Umgebung samt kompatiblen PyGObject-Bindings
-eingerichtet werden. Die Systempakete alleine reichen dann nicht
-immer für ein zusätzlich installiertes Python.
-
-**Wichtig bei `.venv`:** Die üblichen Python-Virtualenvs blenden
-System-Pakete aus. Damit das systemweit installierte PyGObject in
-der virtuellen Umgebung sichtbar wird, erstelle diese mit
-`--system-site-packages` (Python-Version muss zur Systembindung passen):
-
-~~~bash
-git clone -b gpt https://github.com/Protarios/gittool.git
+~~~powershell
+git clone --branch windows https://github.com/Protarios/gittool.git
 cd gittool
-python -m venv --system-site-packages .venv
-source .venv/bin/activate
+py -3.14 -m venv .venv
+.\.venv\Scripts\Activate.ps1
 python -m pip install -e .
 gittool
 ~~~
 
-Wenn du wie bisher bereits eine funktionierende `.venv` angelegt hast,
-kannst du die vorhandene Umgebung beibehalten und in
-`.venv/pyvenv.cfg` die Zeile
+Ist Python 3.13 installiert, ersetze \`py -3.14\` durch \`py -3.13\`.
 
-~~~ini
-include-system-site-packages = true
-~~~
+**Bereits geklontes GitTool aktualisieren:**
 
-setzen. **Nur wenn** das System-`python-gobject` zur exakt
-gleichen Python-Version passt, ist `import gi` damit verfügbar.
-Prüfe mit:
-
-~~~bash
-python -c "import gi; gi.require_version('Gtk', '4.0'); gi.require_version('Adw', '1'); from gi.repository import Gtk, Adw; print('GTK verfügbar')"
-~~~
-
-Wenn die Systembindung nicht zur Python-Version passt, müssen
-PyGObject und Pycairo in der virtuellen Umgebung mit den passenden
-System-Entwicklungspaketen installiert werden; siehe
-[offizielle PyGObject-Anleitung](https://pygobject.gnome.org/getting_started.html).
-
-**Projekt bereits vorhanden?** Im Branch `gpt` wechseln und aktualisieren:
-
-~~~bash
+~~~powershell
 git fetch origin
-git switch gpt                 # Falls der lokale Branch bereits existiert
+git switch --track origin/windows
+python -m pip install -e .
+gittool
+~~~
+
+Wenn du einen lokalen Branch \`windows\` schon hast, verwende stattdessen:
+
+~~~powershell
+git switch windows
 git pull --ff-only
 python -m pip install -e .
 gittool
 ~~~
 
-Wenn es noch keinen lokalen `gpt`-Branch gibt,
-anstelle von `git switch gpt` einmal
-`git switch --track origin/gpt` ausführen.
+Du kannst alternativ \`python -m gittool\` verwenden.
+Ein erneuter pip-Aufruf ist nur nötig, wenn sich Python-Abhängigkeiten ändern.
+Ein Paket, das mit \`pip install -e .\` installiert wurde, verwendet sonst
+direkt die ausgecheckten Python-Quelldateien.
 
-Die direkte Startform `python -m gittool` funktioniert ebenfalls.
+## Funktionalität
 
-## Bedienung
+- Git-Repository über Dialog oder eingegebenen Pfad hinzufügen;
+  übergeordneten Ordner rekursiv durchsuchen, inklusive Worktrees.
+- Lokale Repository-Liste dauerhaft speichern.
+- Ausgewählte oder alle Repositories auf Remote-Änderungen prüfen.
+- Ausgewählte oder alle Repositories prüfen und sicher aktualisieren.
+- Repository-Tabelle mit Branch, Upstream, geändert/sauber, Ahead, Behind,
+  Status und Pfad; Spaltensortierung, Mehrfachauswahl und Suche.
+- Farbcodierung (jeweils zusätzlich ein Klartext-Status):
+  - **Grün:** aktuell
+  - **Blau:** Pull möglich
+  - **Orange:** lokale Änderungen/Commits, fehlendes Remote/Upstream
+  - **Rot:** divergierter Branch, detached HEAD oder Fehler
+  - **Grau:** noch nicht geprüft
+- Protokoll und Fortschrittsanzeige; Git-Vorgänge laufen im Hintergrund,
+  damit die Oberfläche bedienbar bleibt.
 
-1. Links oben mit **+** einen Repository-Stammordner hinzufügen, mit dem
-   Suchordnersymbol mehrere Repositories unterhalb eines Verzeichnisses
-   finden oder den Pfad direkt eingeben.
-2. **Alle prüfen** ruft bei jedem Repository `git fetch` auf und zeigt
-   an, ob Remote-Commits vorliegen (↑ Ahead / ↓ Behind).
-3. **Alle prüfen + Pull** versucht ausschließlich sichere Fast-Forwards.
-4. Die Auswahlkästchen erlauben Aktionen auf einzelne Repositories.
-   Die Suchzeile filtert die Ansicht, nicht die gespeicherte Repository-Liste.
-5. Das Protokoll zeigt Erfolge, übersprungene Repositories und Fehler.
+Die Statusprüfung nutzt \`git fetch\`, Gittyup und Git-Plumbing.
+Der Pull wird durch
+\`gittyup.git_operations.pull_repository_detailed()\` ausgeführt,
+aber nur bei sauberem Arbeitsverzeichnis, eingerichtetem Upstream,
+\`ahead=0\` und \`behind>0\`. Für den Kindprozess erzwingt GitTool
+\`pull.ff=only\`. Lokale Änderungen, divergierte Branches oder
+detached HEAD werden **nicht** automatisch gemergt, verworfen,
+rebased oder gestasht. Git-LFS und Hooks laufen wie bei normalem Git.
 
-Die automatische Aktualisierung führt **kein** `reset`, `stash`,
-`push` und keinen selbstständigen Branch-Wechsel aus. Der eigentliche
-Pull erfolgt mit
-`gittyup.git_operations.pull_repository_detailed()`. GitTool erzwingt
-`pull.ff=only` temporär für diesen Git-Prozess, nicht in der
-Git-Konfiguration des Repositories. Git-Hooks und Git-LFS-Filter können
-wie bei einem normalen `git pull` trotzdem ausgeführt werden.
-
-Die Repository-Liste enthält **keine Zugangsdaten**, sondern nur Pfade.
-Sie liegt im von `platformdirs` ermittelten Benutzer-Konfigurationsverzeichnis
-unter `gittool/repositories.json`.
+Die Konfiguration enthält nur Pfade und wird unter
+\`platformdirs.user_config_path("gittool", "Protarios")/repositories.json\`
+gespeichert.
 
 ## Tests
 
-~~~bash
+~~~powershell
+$env:QT_QPA_PLATFORM = "offscreen"
 python -m unittest discover -s tests -v
+Remove-Item Env:\QT_QPA_PLATFORM
 ~~~
 
-Die Backend-Tests verwenden lokale Git-Repositories. Der Linux-CI-Lauf
-testet zusätzlich den Start des GTK-Fensters in Xvfb.
+Der Windows-GUI-Test erzeugt ein Qt-Fenster ohne angeschlossenen Bildschirm,
+prüft Suche, Auswahl, die Statusfarben und deren Zuordnung. Dazu kommen
+die Offline-Git-Tests mit echten lokalen Test-Repositories.
 
-## Aufbau
+## Projektstruktur
 
-- `gittool/app.py`: GTK4/libadwaita GUI, Farbanzeige, Hintergrund-Worker.
-- `gittool/status_style.py`: Zustands- und Farbcodes unabhängig vom GUI.
-- `gittool/backend.py`: Gittyup-Anbindung, Fetch, Ahead/Behind und Pull-Schutz.
-- `gittool/config.py`: atomare Speicherung der bisherigen Pfadliste.
-- `tests/`: Git-Backend- und GUI-Regressionsprüfungen.
-
-Entwicklung: [Branch gpt](https://github.com/Protarios/gittool/tree/gpt).
+- \`gittool/app.py\`: PySide6/Qt6-Fenster, farbige Tabelle und Worker-Events.
+- \`gittool/status_style.py\`: Status-Kategorien, gemeinsam mit GTK-Version.
+- \`gittool/backend.py\`: Gittyup-Backend und Fast-Forward-Sicherheitsprüfungen.
+- \`gittool/config.py\`: persistente Repository-Liste.
+- \`tests/\`: Backend- und GUI-Tests.

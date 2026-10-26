@@ -1,3 +1,3 @@
-"""GitTool – GTK 4/libadwaita desktop application."""
+"""GitTool – Windows-compatible PySide6/Qt6 gittyup application."""
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
