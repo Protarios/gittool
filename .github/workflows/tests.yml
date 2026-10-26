@@ -1,4 +1,4 @@
-name: Windows Tests (Qt6)
+name: Cross-platform Qt6 Tests
 
 on:
   push:
@@ -8,11 +8,12 @@ on:
 
 jobs:
   unittest:
-    name: Windows / Python ${{ matrix.python-version }}
-    runs-on: windows-latest
+    name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, windows-latest]
         python-version: ['3.13', '3.14']
     env:
       QT_QPA_PLATFORM: offscreen
