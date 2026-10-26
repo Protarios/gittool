@@ -216,26 +216,86 @@ class GitToolWindow(QMainWindow):
         self.statusBar().showMessage("Mehrfachauswahl mit Strg oder Umschalt. Kein Merge und kein Rebase.")
         self._refresh_buttons()
 
-    def _register_repository(self, path: Path, *, persist: bool = True) -> bool:
-        path = path.expanduser().resolve()
-        key = os.path.normcase(str(path))
-        if any(os.path.normcase(str(p)) == key for p in self.repositories):
-            return False
+    def _register_repository(
+        self, path: Path, *, parent: Path | None = None,
+        persist: bool = True, discover: bool = True,
+    ) -> bool:
+        path = Path(path).expanduser().resolve()
+        added = self.catalog.add(path, parent) if not self.catalog.has(path) else False
+        changed = added
+        if parent is not None and not added:
+            changed = self.catalog.attach(path, parent) or changed
+        if discover:
+            try:
+                descendants = discover_submodules(path)
+            except GitToolError as exc:
+                descendants = []
+                self._log(f"Submodule konnten nicht geprüft werden ({path}): {exc}")
+            for child, immediate_parent in descendants:
+                if not self.catalog.has(child):
+                    self.catalog.add(child, immediate_parent)
+                    changed = True
+                else:
+                    changed = self.catalog.attach(child, immediate_parent) or changed
+        if changed:
+            self._rebuild_tree()
+            if persist:
+                self._save()
+        return added
 
-        item = QTreeWidgetItem(
-            [path.name, "–", "–", "–", "–", "–", "Nicht geprüft", str(path)]
-        )
-        item.setData(0, Qt.ItemDataRole.UserRole, str(path))
-        item.setToolTip(0, str(path))
-        self.tree.addTopLevelItem(item)
-        self.repositories.append(path)
-        self.items[str(path)] = item
-        self._colorize(item, "Nicht geprüft")
+    def _rebuild_tree(self) -> None:
+        """Rebuild true parent/child rows while retaining state and selection."""
+        selected = {str(path) for path in self._selected_paths()}
+        self.repositories = self.catalog.paths
+        self.tree.blockSignals(True)
+        try:
+            self.tree.clear()
+            self.items.clear()
+            for entry in self.catalog.entries:
+                path = entry.path
+                label = f"↳ {path.name}" if entry.parent else path.name
+                item = QTreeWidgetItem(
+                    [label, "–", "–", "–", "–", "–", "Nicht geprüft", str(path)]
+                )
+                item.setData(0, Qt.ItemDataRole.UserRole, str(path))
+                item.setToolTip(0, (
+                    f"Submodul von {entry.parent}\n{path}" if entry.parent else str(path)
+                ))
+                if entry.parent is not None:
+                    self.items[str(entry.parent)].addChild(item)
+                else:
+                    self.tree.addTopLevelItem(item)
+                self.items[str(path)] = item
+                state = self.states.get(str(path))
+                if state is not None:
+                    self._write_item_state(item, state)
+                if str(path) in self.errors:
+                    self._colorize(item, "Fehler")
+                    item.setToolTip(STATUS_COLUMN, self.errors[str(path)])
+                elif state is None:
+                    self._colorize(item, "Nicht geprüft")
+                if str(path) in selected:
+                    item.setSelected(True)
+            self.tree.expandAll()
+        finally:
+            self.tree.blockSignals(False)
         self._filter_rows()
         self._update_summary()
-        if persist:
+
+    def _write_item_state(self, item: QTreeWidgetItem, state: RepositoryState) -> None:
+        item.setText(1, state.branch or "–")
+        item.setText(2, state.upstream or "–")
+        item.setText(3, "Geändert" if state.dirty else "Sauber")
+        item.setText(4, str(state.ahead))
+        item.setText(5, str(state.behind))
+        item.setToolTip(STATUS_COLUMN, state.detail)
+        self._colorize(item, state.status)
+
+    def _move_selected(self, direction: int) -> None:
+        selected = self._selected_paths()
+        if selected and self.catalog.move(selected[0], direction):
+            self._rebuild_tree()
             self._save()
-        return True
 
     def _colorize(self, item: QTreeWidgetItem, status: str) -> None:
         label, category, _icon = visual_status(status)
@@ -262,22 +322,23 @@ class GitToolWindow(QMainWindow):
             return
         self.states[key] = state
         self.errors.pop(key, None)
-        item.setText(1, state.branch or "–")
-        item.setText(2, state.upstream or "–")
-        item.setText(3, "Geändert" if state.dirty else "Sauber")
-        item.setText(4, str(state.ahead))
-        item.setText(5, str(state.behind))
-        item.setToolTip(STATUS_COLUMN, state.detail)
-        self._colorize(item, state.status)
+        self._write_item_state(item, state)
         self._filter_rows()
         self._update_summary()
 
     def _filter_rows(self) -> None:
         query = self.search.text().strip().casefold()
+        matches: set[str] = set()
         for path in self.repositories:
             item = self.items[str(path)]
-            text = " ".join(item.text(index) for index in range(len(COLUMNS))).casefold()
-            item.setHidden(bool(query and query not in text))
+            haystack = " ".join(item.text(index) for index in range(len(COLUMNS))).casefold()
+            if not query or query in haystack:
+                entry = self.catalog.find(path)
+                while entry is not None:
+                    matches.add(str(entry.path))
+                    entry = self.catalog.find(entry.parent) if entry.parent else None
+        for path in self.repositories:
+            self.items[str(path)].setHidden(str(path) not in matches)
         self._refresh_buttons()
 
     def _selected_paths(self) -> list[Path]:
@@ -298,7 +359,16 @@ class GitToolWindow(QMainWindow):
         self.selected_pull.setEnabled(any_selection)
         self.all_check.setEnabled(any_repos)
         self.all_pull.setEnabled(any_repos)
-        # Remove button is the third button in the toolbar, after Add/Scan/Path.
+        selected = self._selected_paths()
+        if len(selected) == 1:
+            entry = self.catalog.find(selected[0])
+            siblings = self.catalog._children(entry.parent) if entry else []
+            index = siblings.index(entry) if entry else -1
+            self.move_up.setEnabled(index > 0)
+            self.move_down.setEnabled(0 <= index < len(siblings) - 1)
+        else:
+            self.move_up.setEnabled(False)
+            self.move_down.setEnabled(False)
         for button in self.buttons:
             if button.text() == "Auswahl entfernen":
                 button.setEnabled(any_selection)
