@@ -63,7 +63,7 @@ class QtGuiTests(unittest.TestCase):
         self.assertEqual(self.window._selected_paths(), [self.path])
         self.assertTrue(self.window.selected_pull.isEnabled())
 
-        with patch("gittool.app.save_repositories"):
+        with patch("gittool.app.save_repository_entries"):
             self.window._remove_selected()
         self.assertEqual(len(self.window.repositories), 0)
         self.assertEqual(self.window.tree.topLevelItemCount(), 0)
