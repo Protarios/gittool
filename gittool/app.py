@@ -7,7 +7,9 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+from dataclasses import dataclass
 import os
+import threading
 from pathlib import Path
 import sys
 
@@ -15,9 +17,10 @@ try:
     from PySide6.QtCore import QObject, Qt, QTimer, Signal
     from PySide6.QtGui import QBrush, QColor, QFont
     from PySide6.QtWidgets import (
-        QAbstractItemView, QApplication, QFileDialog, QFrame, QHBoxLayout,
-        QHeaderView, QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit,
-        QProgressBar, QPushButton, QSplitter, QTreeWidget, QTreeWidgetItem,
+        QAbstractItemView, QApplication, QDialog, QDialogButtonBox, QFileDialog,
+        QFrame, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow,
+        QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QSplitter,
+        QTreeWidget, QTreeWidgetItem,
         QVBoxLayout, QWidget,
     )
 except ImportError as exc:
@@ -27,8 +30,9 @@ except ImportError as exc:
     ) from exc
 
 from .backend import (
-    GitToolError, PullOutcome, RepositoryState, discover_repositories, discover_submodules,
-    inspect_repository, normalize_repository, pull_repository,
+    GitToolError, PullOutcome, PullPreview, RepositoryState,
+    discover_repositories, discover_submodules, inspect_repository,
+    normalize_repository, prepare_pull, pull_repository,
 )
 from .config import default_config_path, load_repository_entries, save_repository_entries
 from .repository_catalog import RepositoryCatalog
@@ -43,6 +47,14 @@ STATUS_COLUMN = 6
 PATH_COLUMN = 7
 
 
+@dataclass
+class PullReviewRequest:
+    """Worker-to-GUI request requiring an explicit decision."""
+    preview: PullPreview
+    complete: threading.Event
+    approved: bool = False
+
+
 class WorkerEvents(QObject):
     """Qt automatically dispatches cross-thread signals to the GUI thread."""
 
@@ -51,6 +63,7 @@ class WorkerEvents(QObject):
     error = Signal(object, str)
     scan = Signal(object)
     submodules = Signal(object)
+    pull_review = Signal(object)
     finished = Signal()
 
 
@@ -72,6 +85,7 @@ class GitToolWindow(QMainWindow):
         self.events.error.connect(self._on_error)
         self.events.scan.connect(self._on_scan)
         self.events.submodules.connect(self._on_submodules)
+        self.events.pull_review.connect(self._on_pull_review)
         self.events.finished.connect(self._on_finished)
         self.busy = False
         self.completed = 0
@@ -556,11 +570,100 @@ class GitToolWindow(QMainWindow):
             else:
                 for path in paths:
                     try:
-                        self.events.outcome.emit(pull_repository(path))
+                        preview = prepare_pull(path)
+                        if preview.needs_confirmation:
+                            request = PullReviewRequest(preview, threading.Event())
+                            self.events.pull_review.emit(request)
+                            request.complete.wait()
+                            if not request.approved:
+                                self.events.outcome.emit(PullOutcome(
+                                    preview.state, "Übersprungen",
+                                    "Pull abgebrochen; keine lokalen Dateien geändert.",
+                                ))
+                                continue
+                            outcome = pull_repository(path, approved_preview=preview)
+                        else:
+                            outcome = pull_repository(path)
+                        self.events.outcome.emit(outcome)
                     except Exception as exc:
                         self.events.error.emit(path, str(exc))
         finally:
             self.events.finished.emit()
+
+    def _on_pull_review(self, request: PullReviewRequest) -> None:
+        """List local changes and offer approval only if paths do not collide."""
+        preview = request.preview
+        try:
+            dialog = QDialog(self)
+            dialog.setWindowTitle(f"Lokale Änderungen – {preview.state.name}")
+            dialog.resize(760, 470)
+            layout = QVBoxLayout(dialog)
+
+            if preview.overlaps:
+                heading = QLabel(
+                    "<b>Pull gesperrt:</b> Eingehende Commits berühren "
+                    "lokal geänderte oder unversionierte Dateien."
+                )
+            else:
+                heading = QLabel(
+                    "<b>Lokale Änderungen vorhanden.</b> Die eingehenden Commits "
+                    "berühren nach der Vorprüfung keine dieser Dateien. "
+                    "Möchtest du den Fast-Forward-Pull durchführen?"
+                )
+            heading.setWordWrap(True)
+            layout.addWidget(heading)
+
+            summary = QLabel(
+                f"Repository: {preview.state.path}\n"
+                f"Branch: {preview.state.branch} → {preview.state.upstream}\n"
+                f"Eingehende Commits: {preview.state.behind}  ·  "
+                f"Lokale Dateieinträge: {len(preview.changes)}"
+            )
+            summary.setWordWrap(True)
+            layout.addWidget(summary)
+
+            details = QPlainTextEdit(dialog)
+            details.setReadOnly(True)
+            details.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+            details.setPlainText("\n".join(
+                f"{change.status}  {change.path}"
+                + ("    ← Überschneidung!" if change.path in preview.overlaps else "")
+                for change in preview.changes
+            ))
+            layout.addWidget(details, 1)
+
+            if preview.overlaps:
+                note = QLabel(
+                    "Bitte die überschneidenden Dateien sichern, committen, "
+                    "verschieben oder anderweitig klären."
+                )
+            else:
+                note = QLabel(
+                    "Nur Fast-Forward; Git überprüft selbst zusätzlich, dass "
+                    "lokale Änderungen nicht überschrieben werden."
+                )
+            note.setWordWrap(True)
+            layout.addWidget(note)
+
+            buttons = QDialogButtonBox(dialog)
+            cancel = buttons.addButton(
+                "Überspringen", QDialogButtonBox.ButtonRole.RejectRole,
+            )
+            cancel.clicked.connect(dialog.reject)
+            if not preview.overlaps:
+                proceed = buttons.addButton(
+                    "Pull durchführen", QDialogButtonBox.ButtonRole.AcceptRole,
+                )
+                proceed.clicked.connect(dialog.accept)
+            layout.addWidget(buttons)
+            request.approved = bool(
+                not preview.overlaps and dialog.exec() == QDialog.DialogCode.Accepted
+            )
+        except Exception as exc:
+            request.approved = False
+            self._log(f"Pull-Freigabedialog fehlgeschlagen: {exc}")
+        finally:
+            request.complete.set()
 
     def _on_state(self, state: RepositoryState) -> None:
         self._display_state(state)
