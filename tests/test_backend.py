@@ -151,6 +151,47 @@ class RepositoryTests(unittest.TestCase):
         git(self.clone, "checkout", "--detach")
         self.assertEqual(inspect_repository(self.clone).status, "Detached HEAD")
 
+    def test_wise26_tracking_branch_set_by_push_u(self) -> None:
+        """GitTool must agree with Git after push --set-upstream on WiSe26."""
+        git(self.clone, "checkout", "-b", "WiSe26")
+        git(self.clone, "push", "--set-upstream", "origin", "WiSe26")
+        self.assertEqual(
+            git(self.clone, "rev-parse", "--abbrev-ref", "--symbolic-full-name",
+                "@{upstream}"), "origin/WiSe26",
+        )
+        state = inspect_repository(self.clone, fetch=False)
+        self.assertEqual(state.branch, "WiSe26")
+        self.assertEqual(state.upstream, "origin/WiSe26")
+        self.assertEqual(state.status, "Aktuell")
+
+    def test_tracking_ref_missing_is_not_misreported_as_no_upstream(self) -> None:
+        """An unset tracking configuration differs from an unfetched ref."""
+        git(self.clone, "checkout", "-b", "WiSe26")
+        git(self.clone, "push", "-u", "origin", "WiSe26")
+        git(self.clone, "update-ref", "-d", "refs/remotes/origin/WiSe26")
+        lines = git(self.clone, "status", "--porcelain=v2", "--branch")
+        self.assertIn("# branch.upstream origin/WiSe26", lines)
+        self.assertNotIn("# branch.ab", lines)
+        state = inspect_repository(self.clone, fetch=False)
+        self.assertEqual(state.upstream, "origin/WiSe26")
+        self.assertEqual(state.status, "Tracking-Ref fehlt")
+        self.assertFalse(state.can_pull)
+        recovered = inspect_repository(self.clone, fetch=True)
+        self.assertEqual(recovered.status, "Aktuell")
+        self.assertEqual(recovered.upstream, "origin/WiSe26")
+
+    def test_configured_but_unmapped_tracking_branch_reports_detail(self) -> None:
+        """A restrictive fetch refspec must not silently appear up to date."""
+        git(self.clone, "checkout", "-b", "WiSe26")
+        git(self.clone, "push", "-u", "origin", "WiSe26")
+        git(self.clone, "config", "remote.origin.fetch",
+            "+refs/heads/main:refs/remotes/origin/main")
+        git(self.clone, "update-ref", "-d", "refs/remotes/origin/WiSe26")
+        state = inspect_repository(self.clone, fetch=True)
+        self.assertEqual(state.upstream, "origin/WiSe26")
+        self.assertEqual(state.status, "Tracking-Ref fehlt")
+        self.assertFalse(state.can_pull)
+
     def test_invalid_directory(self) -> None:
         with self.assertRaises(GitToolError):
             normalize_repository(self.clone / "missing")
