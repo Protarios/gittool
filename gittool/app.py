@@ -5,14 +5,14 @@ Only the GUI thread touches Qt widgets; worker results use queued Qt signals.
 """
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 import os
 from pathlib import Path
 import sys
 
 try:
-    from PySide6.QtCore import QObject, Qt, Signal
+    from PySide6.QtCore import QObject, Qt, QTimer, Signal
     from PySide6.QtGui import QBrush, QColor, QFont
     from PySide6.QtWidgets import (
         QAbstractItemView, QApplication, QFileDialog, QFrame, QHBoxLayout,
@@ -50,6 +50,7 @@ class WorkerEvents(QObject):
     outcome = Signal(object)
     error = Signal(object, str)
     scan = Signal(object)
+    submodules = Signal(object)
     finished = Signal()
 
 
@@ -62,11 +63,15 @@ class GitToolWindow(QMainWindow):
         self.errors: dict[str, str] = {}
         self.items: dict[str, QTreeWidgetItem] = {}
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="gittool")
+        self.submodule_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="gittool-submodules",
+        )
         self.events = WorkerEvents(self)
         self.events.state.connect(self._on_state)
         self.events.outcome.connect(self._on_outcome)
         self.events.error.connect(self._on_error)
         self.events.scan.connect(self._on_scan)
+        self.events.submodules.connect(self._on_submodules)
         self.events.finished.connect(self._on_finished)
         self.busy = False
         self.completed = 0
@@ -133,6 +138,13 @@ class GitToolWindow(QMainWindow):
             "Alle prüfen", lambda: self._start("check", list(self.repositories))
         )
         command_bar.addWidget(self.all_check)
+        self.quick_check = self._button(
+            "Lokal prüfen", lambda: self._start("quick_check", list(self.repositories))
+        )
+        self.quick_check.setToolTip(
+            "Schnelle Prüfung gegen bereits vorhandene Remote-Refs; ohne git fetch."
+        )
+        command_bar.addWidget(self.quick_check)
         command_bar.addSpacing(8)
         self.selected_pull = self._button(
             "Auswahl prüfen + Pull", lambda: self._start("pull", self._selected_paths())
@@ -328,6 +340,12 @@ class GitToolWindow(QMainWindow):
 
     def _filter_rows(self) -> None:
         query = self.search.text().strip().casefold()
+        if not query:
+            for item in self.items.values():
+                if item.isHidden():
+                    item.setHidden(False)
+            self._refresh_buttons()
+            return
         matches: set[str] = set()
         for path in self.repositories:
             item = self.items[str(path)]
@@ -358,6 +376,7 @@ class GitToolWindow(QMainWindow):
         self.selected_check.setEnabled(any_selection)
         self.selected_pull.setEnabled(any_selection)
         self.all_check.setEnabled(any_repos)
+        self.quick_check.setEnabled(any_repos)
         self.all_pull.setEnabled(any_repos)
         selected = self._selected_paths()
         if len(selected) == 1:
@@ -391,7 +410,8 @@ class GitToolWindow(QMainWindow):
             self._log(f"FEHLER: {exc}")
             QMessageBox.warning(self, "Ungültiges Repository", str(exc))
             return
-        if self._register_repository(path):
+        if self._register_repository(path, discover=False):
+            self._schedule_submodule_scan([path])
             self._log(f"Hinzugefügt: {path}")
         else:
             self.statusBar().showMessage("Repository ist bereits vorhanden.", 4000)
@@ -552,6 +572,7 @@ class GitToolWindow(QMainWindow):
             event.ignore()
             return
         self.executor.shutdown(wait=False, cancel_futures=True)
+        self.submodule_executor.shutdown(wait=False, cancel_futures=True)
         event.accept()
 
 
