@@ -14,10 +14,10 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QCoreApplication, QEvent, Qt  # noqa: E402
 import shiboken6  # noqa: E402
-from PySide6.QtWidgets import QApplication  # noqa: E402
+from PySide6.QtWidgets import QApplication, QDialog  # noqa: E402
 
-from gittool.app import GitToolWindow  # noqa: E402
-from gittool.backend import RepositoryState  # noqa: E402
+from gittool.app import GitToolWindow, PullReviewRequest  # noqa: E402
+from gittool.backend import LocalChange, PullPreview, RepositoryState  # noqa: E402
 from gittool.repository_catalog import RepositoryEntry  # noqa: E402
 from gittool.status_style import visual_status  # noqa: E402
 
@@ -155,6 +155,48 @@ class QtGuiTests(unittest.TestCase):
         self.assertEqual(len(calls), len(paths))
         self.assertTrue(all(not fetch for _, fetch in calls))
         self.assertGreaterEqual(peak, 2)
+
+    def test_local_changes_dialog_explicit_approval(self) -> None:
+        state = RepositoryState(
+            self.path, branch="WiSe26", upstream="origin/WiSe26",
+            dirty=True, behind=3, status="Lokale Änderungen",
+        )
+        preview = PullPreview(
+            state=state,
+            changes=(
+                LocalChange("??", "Script-Beamer/Vorlesung_student_de.pdf"),
+                LocalChange(" M", "notizen.tex"),
+            ),
+            head_oid="head", target_oid="target",
+        )
+        request = PullReviewRequest(preview, threading.Event())
+        with patch.object(QDialog, "exec", return_value=QDialog.DialogCode.Accepted):
+            self.window._on_pull_review(request)
+        self.assertTrue(request.complete.is_set())
+        self.assertTrue(request.approved)
+
+        cancelled = PullReviewRequest(preview, threading.Event())
+        with patch.object(QDialog, "exec", return_value=QDialog.DialogCode.Rejected):
+            self.window._on_pull_review(cancelled)
+        self.assertTrue(cancelled.complete.is_set())
+        self.assertFalse(cancelled.approved)
+
+    def test_local_collision_never_offers_approval(self) -> None:
+        state = RepositoryState(
+            self.path, branch="WiSe26", upstream="origin/WiSe26",
+            dirty=True, behind=2, status="Lokale Änderungen",
+        )
+        preview = PullPreview(
+            state,
+            (LocalChange("??", "Script-Beamer/Vorlesung_student_de.pdf"),),
+            ("Script-Beamer/Vorlesung_student_de.pdf",),
+            "head", "target",
+        )
+        request = PullReviewRequest(preview, threading.Event())
+        with patch.object(QDialog, "exec", return_value=QDialog.DialogCode.Accepted):
+            self.window._on_pull_review(request)
+        self.assertTrue(request.complete.is_set())
+        self.assertFalse(request.approved)
 
     def test_visual_status_categories(self) -> None:
         expectations = {
