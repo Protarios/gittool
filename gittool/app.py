@@ -614,7 +614,7 @@ class GitToolWindow(QMainWindow):
     def _update_summary(self) -> None:
         current = sum(s.status == "Aktuell" for k, s in self.states.items() if k not in self.errors)
         behind = sum(s.status == "Pull möglich" for k, s in self.states.items() if k not in self.errors)
-        warnings = sum(s.status in ("Lokale Änderungen", "Nur lokal voraus", "Kein Upstream", "Kein Remote")
+        warnings = sum(s.status in ("Lokale Änderungen", "Nur lokal voraus", "Kein Upstream", "Kein Remote", "Tracking-Ref fehlt")
                        for k, s in self.states.items() if k not in self.errors)
         blocked = sum(s.status in ("Divergiert", "Detached HEAD")
                       for k, s in self.states.items() if k not in self.errors) + len(self.errors)
