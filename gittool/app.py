@@ -170,7 +170,7 @@ class GitToolWindow(QMainWindow):
             primary=True,
         )
         self.all_pull.setToolTip(
-            "Prüfen und ausschließlich saubere Fast-Forward-Repositories aktualisieren"
+            "Fast-Forward-Prüfung; bei lokalen Änderungen Dateiliste zeigen und Freigabe einholen"
         )
         command_bar.addWidget(self.all_pull)
         command_bar.addStretch()
@@ -716,8 +716,8 @@ class GitToolWindow(QMainWindow):
 
     def _update_summary(self) -> None:
         current = sum(s.status == "Aktuell" for k, s in self.states.items() if k not in self.errors)
-        behind = sum(s.status == "Pull möglich" for k, s in self.states.items() if k not in self.errors)
-        warnings = sum(s.status in ("Lokale Änderungen", "Nur lokal voraus", "Kein Upstream", "Kein Remote", "Tracking-Ref fehlt")
+        behind = sum(s.status in ("Pull möglich", "Lokal geändert · Pull möglich") for k, s in self.states.items() if k not in self.errors)
+        warnings = sum(s.status in ("Lokale Änderungen", "Lokal geändert · Aktuell", "Lokal geändert · Lokal voraus", "Nur lokal voraus", "Kein Upstream", "Kein Remote", "Tracking-Ref fehlt")
                        for k, s in self.states.items() if k not in self.errors)
         blocked = sum(s.status in ("Divergiert", "Detached HEAD")
                       for k, s in self.states.items() if k not in self.errors) + len(self.errors)
