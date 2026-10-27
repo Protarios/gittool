@@ -1,0 +1,42 @@
+name: Windows EXE (PyInstaller)
+
+on:
+  push:
+    branches: [windows]
+  workflow_dispatch:
+
+jobs:
+  package:
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - name: Build Windows GUI executable (no console)
+        shell: pwsh
+        run: .\scripts\build_windows.ps1 -Layout onedir
+      - name: Smoke test packaged application
+        shell: pwsh
+        run: |
+          $exe = (Resolve-Path .\dist\GitTool\GitTool.exe).Path
+          $process = Start-Process -FilePath $exe -PassThru
+          try {
+            Start-Sleep -Seconds 5
+            $process.Refresh()
+            if ($process.HasExited) {
+              throw "GitTool.exe exited unexpectedly (code $($process.ExitCode))."
+            }
+          } finally {
+            if (!$process.HasExited) {
+              Stop-Process -Id $process.Id -Force
+            }
+          }
+      - name: Publish portable ZIP source directory
+        uses: actions/upload-artifact@v4
+        with:
+          name: GitTool-Windows-portable
+          path: dist/GitTool/
+          if-no-files-found: error
