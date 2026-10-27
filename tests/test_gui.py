@@ -54,6 +54,50 @@ class QtGuiTests(unittest.TestCase):
         self.assertFalse(self.window.all_check.isEnabled())
         self.assertFalse(self.window.all_pull.isEnabled())
 
+    def test_add_and_scan_buttons_work_again_after_repeated_operations(self) -> None:
+        """Regression: generic action buttons must not stay disabled after work."""
+        by_label = {button.text(): button for button in self.window.buttons}
+        add = by_label["＋ Repository"]
+        scan = by_label["Ordner scannen"]
+        typed = by_label["Pfad hinzufügen"]
+
+        self.window._register_repository(self.path, persist=False, discover=False)
+        # Each operation disables every button, but _on_finished must restore
+        # add, scan and manual path entry regardless of any selected row.
+        for operation in ("scan", "check", "pull", "scan"):
+            with patch.object(self.window.executor, "submit") as submit:
+                self.window._start(operation, [self.path])
+                submit.assert_called_once()
+            self.assertFalse(add.isEnabled())
+            self.assertFalse(scan.isEnabled())
+            self.assertFalse(typed.isEnabled())
+
+            self.window._on_finished()
+            self.assertTrue(add.isEnabled(), operation)
+            self.assertTrue(scan.isEnabled(), operation)
+            self.assertTrue(typed.isEnabled(), operation)
+            self.assertTrue(self.window.all_check.isEnabled())
+            self.assertFalse(self.window.selected_check.isEnabled())
+
+            # Verify that a click actually invokes the corresponding action,
+            # not just that its enabled flag appears true.
+            with (
+                patch("gittool.app.QFileDialog.getExistingDirectory",
+                      return_value=str(self.path)) as dialog,
+                patch.object(self.window, "_add_from_path") as register,
+                patch.object(self.window, "_start") as start,
+            ):
+                add.click()
+                scan.click()
+                self.window.path_input.setText(str(self.path))
+                typed.click()
+                self.assertEqual(dialog.call_count, 2)
+                self.assertEqual(register.call_count, 2)
+                start.assert_called_once_with("scan", [self.path])
+
+    def test_obsolete_grey_legend_is_removed(self) -> None:
+        self.assertFalse(hasattr(self.window, "legend"))
+
     def test_add_select_and_remove_repository(self) -> None:
         self.assertTrue(self.window._register_repository(self.path, persist=False))
         self.assertFalse(self.window._register_repository(self.path, persist=False))
