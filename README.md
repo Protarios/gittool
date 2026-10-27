@@ -114,6 +114,50 @@ Dateien älterer Version 1 werden ohne Verlust der Reihenfolge übernommen.
 **Entfernen** eines Hauptrepositories löscht auch die zugehörigen Submodule
 aus der *Liste*, niemals von der Festplatte.
 
+## Windows-EXE ohne Terminal mit PyInstaller
+
+Der Branch enthält den **absolut importierenden Einstiegspunkt**
+`gittool_launcher.py` und ein PowerShell-Buildskript. Der GUI-Modus von
+PyInstaller (`--windowed`) startet **ohne Konsolenfenster**. Anders als
+`gittool/__main__.py` ist der Launcher für PyInstaller ein reguläres Skript.
+
+Im Windows-PowerShell-Terminal aus dem Projektverzeichnis und mit Python
+3.13/3.14:
+
+~~~powershell
+.\scripts\build_windows.ps1
+~~~
+
+Ergebnis: `dist\GitTool\GitTool.exe`. Der **gesamte Ordner**
+`dist\GitTool` wird zur Weitergabe benötigt. Wer stattdessen eine
+einzelne EXE möchte:
+
+~~~powershell
+.\scripts\build_windows.ps1 -Layout onefile
+~~~
+
+Ergebnis: `dist\GitTool.exe`. Bei `--onefile` entpackt die EXE beim
+Start die Python- und Qt-Bibliotheken in ein temporäres Verzeichnis.
+
+Alternativer manueller Build:
+
+~~~powershell
+python -m pip install pyinstaller
+python -m PyInstaller --noconfirm --clean --windowed --onedir --name GitTool --paths . --collect-submodules gittyup gittool_launcher.py
+~~~
+
+GitTool enthält Qt/Python, **nicht Git für Windows**. Auf Zielrechnern
+muss `git.exe` weiterhin über den `PATH` erreichbar sein. Die GUI
+selbst öffnet kein Terminalfenster; Git-Subprozesse aus externen
+Bibliotheken können unabhängig davon unter Windows noch kurz
+Konsolenfenster erzeugen.
+
+Der GitHub-Actions-Workflow
+[Windows EXE (PyInstaller)](https://github.com/Protarios/gittool/actions/workflows/build-windows-exe.yml)
+erstellt und prüft bei Push in den Branch `windows` automatisch einen
+portablen Build. Die ZIP-Datei steht als Workflow-Artefakt bereit und
+kann aus GitHub Actions heruntergeladen werden.
+
 ## Funktionalität
 
 - Git-Repository über Dialog oder eingegebenen Pfad hinzufügen;
