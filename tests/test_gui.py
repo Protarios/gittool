@@ -54,6 +54,16 @@ class QtGuiTests(unittest.TestCase):
         self.assertFalse(self.window.all_check.isEnabled())
         self.assertFalse(self.window.all_pull.isEnabled())
 
+    def test_application_icon_is_packaged_and_visible(self) -> None:
+        from importlib.resources import files
+        from gittool.app_icon import application_icon
+
+        asset = files("gittool").joinpath("assets", "gittool.png")
+        self.assertTrue(asset.is_file())
+        self.assertGreater(len(asset.read_bytes()), 500)
+        self.assertFalse(application_icon().isNull())
+        self.assertFalse(self.window.windowIcon().isNull())
+
     def test_add_and_scan_buttons_work_again_after_repeated_operations(self) -> None:
         """Regression: generic action buttons must not stay disabled after work."""
         by_label = {button.text(): button for button in self.window.buttons}
