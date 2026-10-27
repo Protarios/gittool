@@ -114,7 +114,7 @@ class StatusColorTests(unittest.TestCase):
         )
 
     def test_gtk_source_uses_deferred_submodule_discovery(self) -> None:
-        source = (Path(__file__).resolve().parents[1] / "gittool" / "app.py").read_text()
+        source = (Path(__file__).resolve().parents[1] / "gittool" / "app.py").read_text(encoding="utf-8")
         self.assertIn("self.catalog = RepositoryCatalog(entries)", source)
         self.assertIn("self.submodule_executor.submit(", source)
         self.assertIn("max_workers=min(4, len(paths))", source)
