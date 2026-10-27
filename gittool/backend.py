@@ -163,12 +163,32 @@ def inspect_repository(value: str | Path, *, fetch: bool = True) -> RepositorySt
             status="Detached HEAD", detail="Kein Pull auf detached HEAD.",
         )
     if not upstream:
-        has_remote = bool(_git(path, "remote").stdout.strip())
-        return RepositoryState(
-            path, branch=branch, dirty=dirty,
-            status="Kein Upstream" if has_remote else "Kein Remote",
-            detail="Tracking-Branch fehlt." if has_remote else "Kein Remote konfiguriert.",
+        # Porcelain v2 does not expose the branch.upstream line in every
+        # configuration (e.g. when its tracking ref has not been fetched).
+        # Ask Git's canonical upstream resolver before classifying the branch.
+        resolved = _git(
+            path, "rev-parse", "--abbrev-ref", "--symbolic-full-name",
+            "@{upstream}", check=False,
         )
+        if resolved.returncode == 0 and resolved.stdout.strip():
+            upstream = resolved.stdout.strip()
+            counts = _git(
+                path, "rev-list", "--left-right", "--count", "HEAD...@{upstream}",
+            ).stdout.split()
+            if len(counts) != 2:
+                raise GitToolError("Ungültige Ahead/Behind-Angabe von Git.")
+            ahead, behind = (int(value) for value in counts)
+        else:
+            has_remote = bool(_git(path, "remote").stdout.strip())
+            return RepositoryState(
+                path, branch=branch, dirty=dirty,
+                status="Kein Upstream" if has_remote else "Kein Remote",
+                detail=(
+                    "Kein auflösbarer Tracking-Branch für diesen Branch. "
+                    "Status erneut prüfen, falls der Upstream im Terminal gesetzt wurde."
+                    if has_remote else "Kein Remote konfiguriert."
+                ),
+            )
     if fetch:
         # Match Git's actual branch config, not just the visible upstream name:
         # remotes may contain '/' and a branch can track a local branch.
