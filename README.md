@@ -101,9 +101,12 @@ mit **Python 3.13 und 3.14** (Qt unter Linux im Headless-Modus).
 - **Alle prüfen:** Führt weiterhin `git fetch` aus, prüft jedoch bis zu vier
   voneinander unabhängige Repositories parallel. Laufzeit hängt von Netzwerk,
   Repository-Größe und Anmeldedaten ab.
-- **Prüfen + Pull:** Bleibt absichtlich sequenziell und erzwingt weiterhin
-  Fast-Forward-only und ein sauberes Arbeitsverzeichnis. GitTool führt
-  keine parallelen Pulls in zusammenhängenden Worktrees aus.
+- **Prüfen + Pull:** Bleibt absichtlich sequenziell und erzwingt
+  Fast-Forward-only. Bei lokalen Änderungen prüft GitTool sämtliche
+  unversionierten, gestagten und geänderten Dateien gegen die Pfade der
+  eingehenden Commits und zeigt einen Bestätigungsdialog an. Gibt es
+  Überschneidungen, ist der Pull gesperrt. GitTool führt keine parallelen
+  Pulls in zusammenhängenden Worktrees aus.
 - **Schnellerer lokaler Git-Status:** Die Angaben für Branch, Upstream,
   Ahead/Behind und lokale Änderungen kommen aus `git status --porcelain=v2`
   statt aus mehreren separaten Git-Aufrufen.
@@ -209,13 +212,38 @@ kann aus GitHub Actions heruntergeladen werden.
   damit die Oberfläche bedienbar bleibt.
 
 Die Statusprüfung nutzt `git fetch`, Gittyup und Git-Plumbing.
-Der Pull wird durch
-`gittyup.git_operations.pull_repository_detailed()` ausgeführt,
-aber nur bei sauberem Arbeitsverzeichnis, eingerichtetem Upstream,
-`ahead=0` und `behind>0`. Für den Kindprozess erzwingt GitTool
-`pull.ff=only`. Lokale Änderungen, divergierte Branches oder
-detached HEAD werden **nicht** automatisch gemergt, verworfen,
-rebased oder gestasht. Git-LFS und Hooks laufen wie bei normalem Git.
+Bei **sauberem Arbeitsverzeichnis** und `ahead=0`, `behind>0` verwendet
+GitTool weiterhin `gittyup.git_operations.pull_repository_detailed()`
+mit erzwungenem `pull.ff=only`.
+
+### Pull trotz lokaler Dateien (z. B. generierte LaTeX-PDFs)
+
+Wenn eingehende Commits vorhanden sind und GitTool **lokale Änderungen**
+findet, erscheint vor einem Pull ein modaler Dialog:
+
+1. Er listet alle nicht ignorierten **unversionierten**, **modifizierten**
+   sowie **gestagten** Dateipfade mit Git-Statuscode auf.
+2. GitTool vergleicht sie mit den Pfaden, die zwischen `HEAD` und dem
+   zuvor gefetchten `@{upstream}` geändert werden; auch mögliche
+   Datei-/Verzeichnisüberschneidungen zählen.
+3. **Ohne Überschneidung:** Wahl zwischen **Pull durchführen** und
+   **Überspringen**. Die Zustimmung gilt nur für diesen Pull und wird
+   nicht gespeichert. Vor dem Update überprüft GitTool Branch, Refs und
+   die Liste lokaler Änderungen erneut und führt ein `git merge --ff-only`
+   auf den zuvor geprüften Commit aus. Das ist hier die lokale,
+   netzwerkfreie Fast-Forward-Phase des Pulls.
+4. **Mit Überschneidung:** GitTool zeigt die betroffenen Dateien und
+   bietet ausschließlich **Überspringen** an. Kein Überschreiben und
+   kein automatisches Stash/Commit.
+
+**Wichtig:** Ein Fast-Forward-Pull erzeugt keinen Merge-Commit.
+Git schützt zusätzlich vor dem Überschreiben lokaler Änderungen.
+Bei unerwarteten Änderungen oder einem Git-Fehler wird abgebrochen.
+Nicht versionierte, **ignorierte** Dateien erscheinen nicht in der
+Dateiliste; GitTool behandelt sie wie Git im Standardzustand.
+
+Divergierte Branches, fehlende Upstreams und detached HEAD bleiben
+weiterhin gesperrt. Git-LFS und Hooks laufen wie bei normalem Git.
 
 Die Konfiguration enthält nur Pfade und wird unter
 `platformdirs.user_config_path("gittool", "Protarios")/repositories.json`
