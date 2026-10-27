@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from importlib import resources
 from pathlib import Path
 import os
 import sys
@@ -88,6 +89,11 @@ class GitToolApp(Adw.Application):
 
         display = Gdk.Display.get_default()
         if display is not None:
+            # The bundled PNG is a local, unthemed icon named "gittool".
+            # Works from editable installs, wheels, and any working directory.
+            icon_dir = resources.files("gittool").joinpath("assets")
+            Gtk.IconTheme.get_for_display(display).add_search_path(str(icon_dir))
+            Gtk.Window.set_default_icon_name("gittool")
             provider = Gtk.CssProvider()
             provider.load_from_data(CSS.encode("utf-8"))
             Gtk.StyleContext.add_provider_for_display(
@@ -96,6 +102,7 @@ class GitToolApp(Adw.Application):
 
         self.window = Adw.ApplicationWindow(application=self)
         self.window.set_title("GitTool")
+        self.window.set_icon_name("gittool")
         self.window.set_default_size(1160, 760)
         self.window.connect("close-request", self._on_close_request)
 
