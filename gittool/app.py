@@ -407,8 +407,9 @@ class GitToolApp(Adw.Application):
             self._toast(str(exc))
             self._log(f"FEHLER: {exc}")
             return
-        if self._register_repository(path):
+        if self._register_repository(path, discover=False):
             self._log(f"Hinzugefügt: {path}")
+            self._schedule_submodule_scan([path])
         else:
             self._toast("Repository bereits vorhanden.")
         self.path_entry.set_text("")
@@ -435,8 +436,9 @@ class GitToolApp(Adw.Application):
             else:
                 try:
                     normalized = normalize_repository(path)
-                    if self._register_repository(normalized):
+                    if self._register_repository(normalized, discover=False):
                         self._log(f"Hinzugefügt: {normalized}")
+                        self._schedule_submodule_scan([normalized])
                     else:
                         self._toast("Repository bereits vorhanden.")
                 except (GitToolError, OSError) as exc:
@@ -496,6 +498,8 @@ class GitToolApp(Adw.Application):
         # once for every saved repository during startup.
         self.catalog = RepositoryCatalog(entries)
         self._sync_rows()
+        if self.catalog.entries != entries:
+            self._save()
         self._log(f"{len(self.repositories)} Repository(s) geladen.")
         roots = [entry.path for entry in self.catalog.entries if entry.parent is None]
         if roots:
