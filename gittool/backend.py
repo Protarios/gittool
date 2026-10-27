@@ -324,8 +324,10 @@ def _local_changes(path: Path) -> tuple[LocalChange, ...]:
 def _path_overlap(left: str, right: str) -> bool:
     """Conservatively catch identical paths and file/directory replacements."""
     # Git tree paths always use '/' regardless of host OS.
-    a = os.path.normcase(left.replace("\\", "/")).rstrip("/")
-    b = os.path.normcase(right.replace("\\", "/")).rstrip("/")
+    a = left.replace("\\", "/").rstrip("/")
+    b = right.replace("\\", "/").rstrip("/")
+    if os.name == "nt":
+        a, b = a.casefold(), b.casefold()
     return a == b or a.startswith(b + "/") or b.startswith(a + "/")
 
 
@@ -391,6 +393,7 @@ def _fast_forward_only_environment() -> Iterator[None]:
 
 def pull_repository(
     value: str | Path, *, approved_preview: PullPreview | None = None,
+    checked_state: RepositoryState | None = None,
 ) -> PullOutcome:
     """Fast-forward only; permit safe dirty trees with explicit prior approval.
 
@@ -446,7 +449,9 @@ def pull_repository(
                 or "Fast-forward erfolgreich; lokale Dateien unverändert.",
             )
 
-        before = inspect_repository(value, fetch=True)
+        before = checked_state if checked_state is not None else inspect_repository(value, fetch=True)
+        if checked_state is not None and normalize_repository(value) != before.path:
+            raise GitToolError("Repository-Pfad der Vorprüfung stimmt nicht überein.")
         if not before.can_pull:
             action = "Aktuell" if before.status == "Aktuell" else "Übersprungen"
             if before.dirty and before.behind > 0 and before.ahead == 0:
