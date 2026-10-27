@@ -444,7 +444,8 @@ def pull_repository(
             # ff-only pull, without a second fetch invalidating the preview.
             # Git refuses to overwrite local changes even in unforeseen cases.
             result = _git(
-                path, "merge", "--ff-only", approved_preview.target_oid,
+                path, "-c", "merge.autoStash=false",
+                "merge", "--ff-only", approved_preview.target_oid,
                 timeout=NETWORK_TIMEOUT,
             )
             after = inspect_repository(path, fetch=False)
