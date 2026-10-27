@@ -188,13 +188,6 @@ class GitToolWindow(QMainWindow):
         overview.addWidget(self.search)
         layout.addLayout(overview)
 
-        self.legend = QLabel(
-            "● Aktuell      ● Pull möglich      ● Lokale Änderungen      "
-            "● Divergiert / Fehler      ● Nicht geprüft"
-        )
-        self.legend.setObjectName("legend")
-        layout.addWidget(self.legend)
-
         splitter = QSplitter(Qt.Orientation.Vertical)
         self.tree = QTreeWidget()
         self.tree.setColumnCount(len(COLUMNS))
@@ -381,9 +374,12 @@ class GitToolWindow(QMainWindow):
         ]
 
     def _refresh_buttons(self) -> None:
+        # A background operation temporarily disables every action. Always
+        # restore their base state before applying selection-dependent rules;
+        # otherwise add/scan/path actions remain disabled after the first run.
+        for button in self.buttons:
+            button.setEnabled(not self.busy)
         if self.busy:
-            for button in self.buttons:
-                button.setEnabled(False)
             return
         any_repos = bool(self.repositories)
         any_selection = bool(self._selected_paths())
@@ -749,7 +745,6 @@ QMainWindow { background: palette(window); }
 QLabel#pageTitle { font-size: 21pt; font-weight: bold; }
 QLabel#subtitle { color: palette(mid); font-size: 10pt; }
 QLabel#summary { font-size: 11pt; font-weight: bold; }
-QLabel#legend { color: palette(mid); font-size: 9pt; padding: 3px; }
 QLabel#sectionTitle { font-size: 10pt; font-weight: bold; }
 QLineEdit { padding: 8px 11px; border: 1px solid palette(midlight); border-radius: 7px; }
 QLineEdit:focus { border: 1px solid #3988cb; }
