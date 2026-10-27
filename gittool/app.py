@@ -1,12 +1,14 @@
 """GTK4 + libadwaita desktop UI. Git operations never run in the GTK main loop."""
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from datetime import datetime
 from importlib import resources
 from pathlib import Path
 import os
 import sys
+import threading
 
 try:
     import gi
@@ -29,8 +31,9 @@ except (ImportError, ValueError) as exc:
     ) from exc
 
 from .backend import (
-    GitToolError, PullOutcome, RepositoryState, discover_repositories, discover_submodules,
-    inspect_repository, normalize_repository, pull_repository,
+    GitToolError, PullOutcome, PullPreview, RepositoryState,
+    discover_repositories, discover_submodules, inspect_repository,
+    normalize_repository, prepare_pull, pull_repository,
 )
 from .config import default_config_path, load_repository_entries, save_repository_entries
 from .repository_catalog import RepositoryCatalog
@@ -62,6 +65,14 @@ CSS = """
 """
 
 
+@dataclass
+class PullReviewRequest:
+    """Worker waits for the GTK main thread to approve or reject a dirty pull."""
+    preview: PullPreview
+    complete: threading.Event
+    approved: bool = False
+
+
 class GitToolApp(Adw.Application):
     """One application/window; all GTK calls remain on the main thread."""
 
@@ -75,6 +86,9 @@ class GitToolApp(Adw.Application):
         self.row_paths: dict[str, str] = {}
         self.next_row_id = 0
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="gittool")
+        self.submodule_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="gittool-submodules",
+        )
         self.busy = False
         self.closing = False
         self.buttons: list[Gtk.Button] = []
@@ -166,6 +180,15 @@ class GitToolApp(Adw.Application):
         body.append(pathline)
 
         options = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.quick_check = Gtk.Button(label="Lokal prüfen")
+        self.quick_check.set_tooltip_text(
+            "Alle Repositories ohne Netzwerk-Fetch gegen vorhandene Tracking-Refs prüfen."
+        )
+        self.quick_check.connect(
+            "clicked", lambda *_: self._start("quick_check", self.repositories[:])
+        )
+        options.append(self.quick_check)
+        self.buttons.append(self.quick_check)
         for label, callback in (
             ("Auswahl prüfen", lambda: self._start("check", self._selected_paths())),
             ("Auswahl: prüfen + Pull", lambda: self._start("pull", self._selected_paths())),
@@ -188,17 +211,6 @@ class GitToolApp(Adw.Application):
         options.append(self.move_down)
         self.buttons.append(self.move_down)
         body.append(options)
-
-        legend = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=14)
-        for status in ("Aktuell", "Pull möglich", "Lokale Änderungen", "Divergiert"):
-            title, css, icon = visual_status(status)
-            dot = Gtk.Image.new_from_icon_name(icon)
-            dot.add_css_class("pill-" + css)
-            legend.append(dot)
-            caption = Gtk.Label(label=title)
-            caption.add_css_class("dim-label")
-            legend.append(caption)
-        body.append(legend)
 
         scroll = Gtk.ScrolledWindow()
         scroll.set_hexpand(True)
@@ -480,15 +492,14 @@ class GitToolApp(Adw.Application):
             self._toast(f"Konfiguration kann nicht gelesen werden: {exc}")
             self._log(f"FEHLER: {exc} ({default_config_path()})")
             return
-        for entry in entries:
-            self._register_repository(entry.path, parent=entry.parent,
-                                      persist=False, discover=False)
-        roots = [entry.path for entry in self.catalog.entries if entry.parent is None]
-        for root in roots:
-            self._register_repository(root, persist=False, discover=True)
-        if self.catalog.entries != entries:
-            self._save()
+        # Bulk-load: do not rebuild the entire Gtk.ListBox or launch git
+        # once for every saved repository during startup.
+        self.catalog = RepositoryCatalog(entries)
+        self._sync_rows()
         self._log(f"{len(self.repositories)} Repository(s) geladen.")
+        roots = [entry.path for entry in self.catalog.entries if entry.parent is None]
+        if roots:
+            self._schedule_submodule_scan(roots)
 
     def _start(self, operation: str, paths: list[Path]) -> None:
         if self.busy:
@@ -498,7 +509,7 @@ class GitToolApp(Adw.Application):
             return
         self.busy = True
         self.processed = 0
-        self.total = len(paths)
+        self.total = 1 if operation == "scan" else len(paths)
         self.progress.set_fraction(0)
         self.progress.set_text(f"0 / {self.total}")
         for button in self.buttons:
@@ -512,23 +523,132 @@ class GitToolApp(Adw.Application):
             self._event("done", None)
 
     def _work(self, operation: str, paths: list[Path]) -> None:
+        """Independent status checks parallel; pulls serialized and ff-only."""
         try:
             if operation == "scan":
                 try:
                     self._emit("scan", discover_repositories(paths[0]))
                 except Exception as exc:
                     self._emit("error", (paths[0], str(exc)))
-            else:
+            elif operation in ("check", "quick_check"):
+                with ThreadPoolExecutor(
+                    max_workers=min(4, len(paths)), thread_name_prefix="gittool-check",
+                ) as pool:
+                    jobs = {
+                        pool.submit(
+                            inspect_repository, path, fetch=operation == "check",
+                        ): path for path in paths
+                    }
+                    for job in as_completed(jobs):
+                        path = jobs[job]
+                        try:
+                            self._emit("status", job.result())
+                        except Exception as exc:
+                            self._emit("error", (path, str(exc)))
+            elif operation == "pull":
                 for path in paths:
                     try:
-                        if operation == "check":
-                            self._emit("status", inspect_repository(path, fetch=True))
+                        # One fetch and immutable preview; no duplicate network
+                        # fetch when the caller proceeds with a clean tree.
+                        preview = prepare_pull(path)
+                        if preview.needs_confirmation:
+                            request = PullReviewRequest(preview, threading.Event())
+                            self._emit("pull_review", request)
+                            request.complete.wait()
+                            if not request.approved:
+                                self._emit("pull", PullOutcome(
+                                    preview.state, "Übersprungen",
+                                    "Pull abgebrochen; keine lokalen Dateien geändert.",
+                                ))
+                                continue
+                            outcome = pull_repository(path, approved_preview=preview)
                         else:
-                            self._emit("pull", pull_repository(path))
+                            outcome = pull_repository(
+                                path, checked_state=preview.state,
+                            )
+                        self._emit("pull", outcome)
                     except Exception as exc:
                         self._emit("error", (path, str(exc)))
+            else:
+                raise ValueError(f"Unbekannte GitTool-Aktion: {operation}")
         finally:
             self._emit("done", None)
+
+    def _schedule_submodule_scan(self, roots: list[Path]) -> None:
+        if not roots or self.closing:
+            return
+        try:
+            self.submodule_executor.submit(
+                self._discover_submodules_worker, list(roots),
+            )
+        except RuntimeError as exc:
+            self._log(f"Submodul-Prüfung konnte nicht gestartet werden: {exc}")
+
+    def _discover_submodules_worker(self, roots: list[Path]) -> None:
+        discovered: list[tuple[Path, Path]] = []
+        errors: list[str] = []
+        for root in roots:
+            try:
+                discovered.extend(discover_submodules(root))
+            except (GitToolError, OSError) as exc:
+                errors.append(f"{root}: {exc}")
+        self._emit("submodules", (discovered, errors))
+
+    def _show_pull_review(self, request: PullReviewRequest) -> None:
+        """Native nonblocking GTK dialog; worker resumes on explicit response."""
+        preview = request.preview
+        try:
+            blocking = bool(preview.overlaps)
+            heading = (
+                "Pull gesperrt: Dateiüberschneidung"
+                if blocking else "Pull trotz lokaler Änderungen?"
+            )
+            body = (
+                f"{preview.state.name} · {preview.state.branch} → "
+                f"{preview.state.upstream} · {preview.state.behind} Remote-Commits\n"
+                + (
+                    "Eingehende Commits berühren lokale Dateien. "
+                    "Bitte zunächst die betroffenen Dateien klären."
+                    if blocking else
+                    "Keine Pfadüberschneidung erkannt. Die lokalen Dateien "
+                    "bleiben erhalten; Git prüft vor dem Fast-Forward erneut."
+                )
+            )
+            dialog = Adw.MessageDialog.new(self.window, heading, body)
+            dialog.add_response("cancel", "Überspringen")
+            dialog.set_close_response("cancel")
+            if not blocking:
+                dialog.add_response("pull", "Pull durchführen")
+                dialog.set_response_appearance(
+                    "pull", Adw.ResponseAppearance.SUGGESTED,
+                )
+            textview = Gtk.TextView()
+            textview.set_editable(False)
+            textview.set_cursor_visible(False)
+            textview.set_monospace(True)
+            textview.get_buffer().set_text("\n".join(
+                f"{change.status}  {change.path}"
+                + ("    ← Überschneidung!" if change.path in preview.overlaps else "")
+                for change in preview.changes
+            ))
+            scroll = Gtk.ScrolledWindow()
+            scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+            scroll.set_min_content_height(220)
+            scroll.set_size_request(590, 220)
+            scroll.set_child(textview)
+            dialog.set_extra_child(scroll)
+
+            def decision(_dialog: Adw.MessageDialog, response: str) -> None:
+                request.approved = not blocking and response == "pull"
+                request.complete.set()
+                _dialog.destroy()
+
+            dialog.connect("response", decision)
+            dialog.present()
+        except Exception as exc:
+            request.approved = False
+            request.complete.set()
+            self._log(f"Pull-Freigabedialog fehlgeschlagen: {exc}")
 
     def _emit(self, kind: str, payload: object) -> None:
         GLib.idle_add(self._event, kind, payload)
@@ -536,7 +656,26 @@ class GitToolApp(Adw.Application):
     def _event(self, kind: str, payload: object) -> bool:
         if self.closing:
             return False
-        if kind == "status":
+        if kind == "pull_review":
+            self._show_pull_review(payload)
+        elif kind == "submodules":
+            discovered, errors = payload
+            changed = 0
+            for child, parent in discovered:
+                if not self.catalog.has(parent):
+                    continue
+                if not self.catalog.has(child):
+                    self.catalog.add(child, parent)
+                    changed += 1
+                elif self.catalog.attach(child, parent):
+                    changed += 1
+            if changed:
+                self._sync_rows()
+                self._save()
+                self._log(f"Submodule: {changed} neue/zugeordnete Einträge.")
+            for error in errors:
+                self._log(f"Submodul-Prüfung: {error}")
+        elif kind == "status":
             state: RepositoryState = payload
             self._set_status(state.path, state.status, state.detail, state)
             self._log(f"{state.name}: {state.status} – {state.detail}")
@@ -556,9 +695,17 @@ class GitToolApp(Adw.Application):
             self._advance()
         elif kind == "scan":
             discovered = payload
-            count = sum(self._register_repository(path, persist=False) for path in discovered)
-            if count:
+            added: list[Path] = []
+            for path in discovered:
+                path = Path(path).expanduser().resolve()
+                if not self.catalog.has(path):
+                    self.catalog.add(path)
+                    added.append(path)
+            if added:
+                self._sync_rows()
                 self._save()
+                self._schedule_submodule_scan(added)
+            count = len(added)
             self._log(f"Suche: {len(discovered)} gefunden, {count} neu aufgenommen.")
             self._toast(f"{count} Repository(s) hinzugefügt.")
             self._advance()
@@ -578,10 +725,21 @@ class GitToolApp(Adw.Application):
 
     def _update_summary(self) -> None:
         current = sum(s.status == "Aktuell" for key, s in self.states.items() if key not in self.errors)
-        pullable = sum(s.status == "Pull möglich" for key, s in self.states.items() if key not in self.errors)
-        warnings = sum(s.status in ("Lokale Änderungen", "Nur lokal voraus") for key, s in self.states.items() if key not in self.errors)
-        errors = sum(s.status in ("Divergiert", "Detached HEAD", "Kein Upstream", "Kein Remote")
-                     for key, s in self.states.items() if key not in self.errors) + len(self.errors)
+        pullable = sum(
+            s.status in ("Pull möglich", "Lokal geändert · Pull möglich")
+            for key, s in self.states.items() if key not in self.errors
+        )
+        warnings = sum(
+            s.status in (
+                "Lokale Änderungen", "Lokal geändert · Aktuell",
+                "Lokal geändert · Lokal voraus", "Nur lokal voraus",
+                "Kein Upstream", "Kein Remote", "Tracking-Ref fehlt",
+            ) for key, s in self.states.items() if key not in self.errors
+        )
+        errors = sum(
+            s.status in ("Divergiert", "Detached HEAD")
+            for key, s in self.states.items() if key not in self.errors
+        ) + len(self.errors)
         self.summary.set_text(
             f"{len(self.repositories)} Repositories   ·   {current} aktuell   ·   "
             f"{pullable} Pull möglich   ·   {warnings} lokal   ·   {errors} blockiert"
@@ -601,6 +759,7 @@ class GitToolApp(Adw.Application):
             return True
         self.closing = True
         self.executor.shutdown(wait=False, cancel_futures=True)
+        self.submodule_executor.shutdown(wait=False, cancel_futures=True)
         return False
 
 
