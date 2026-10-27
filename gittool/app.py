@@ -533,13 +533,30 @@ class GitToolWindow(QMainWindow):
                     self.events.scan.emit(discover_repositories(paths[0]))
                 except Exception as exc:
                     self.events.error.emit(paths[0], str(exc))
+            elif operation in ("check", "quick_check"):
+                # Only independent read/fetch checks run concurrently. Pulls
+                # remain sequential because gittyup's ff-only environment is
+                # process-wide and order/consistency must not be compromised.
+                workers = min(4, len(paths))
+                with ThreadPoolExecutor(
+                    max_workers=workers, thread_name_prefix="gittool-check",
+                ) as pool:
+                    jobs = {
+                        pool.submit(
+                            inspect_repository, path, fetch=operation == "check",
+                        ): path
+                        for path in paths
+                    }
+                    for future in as_completed(jobs):
+                        path = jobs[future]
+                        try:
+                            self.events.state.emit(future.result())
+                        except Exception as exc:
+                            self.events.error.emit(path, str(exc))
             else:
                 for path in paths:
                     try:
-                        if operation == "check":
-                            self.events.state.emit(inspect_repository(path, fetch=True))
-                        else:
-                            self.events.outcome.emit(pull_repository(path))
+                        self.events.outcome.emit(pull_repository(path))
                     except Exception as exc:
                         self.events.error.emit(path, str(exc))
         finally:
@@ -567,11 +584,19 @@ class GitToolWindow(QMainWindow):
         self._advance()
 
     def _on_scan(self, discovered: list[Path]) -> None:
-        count = sum(self._register_repository(p, persist=False) for p in discovered)
-        if count:
+        # Build just one tree, regardless of how many repositories were found.
+        new: list[Path] = []
+        for path in discovered:
+            path = Path(path).expanduser().resolve()
+            if not self.catalog.has(path):
+                self.catalog.add(path)
+                new.append(path)
+        if new:
+            self._rebuild_tree()
             self._save()
-        self._log(f"Suche: {len(discovered)} gefunden, {count} neu aufgenommen.")
-        self.statusBar().showMessage(f"{count} Repository(s) hinzugefügt.", 7000)
+            self._schedule_submodule_scan(new)
+        self._log(f"Suche: {len(discovered)} gefunden, {len(new)} neu aufgenommen.")
+        self.statusBar().showMessage(f"{len(new)} Repository(s) hinzugefügt.", 7000)
         self._advance()
 
     def _advance(self) -> None:
