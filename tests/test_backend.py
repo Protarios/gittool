@@ -145,6 +145,32 @@ class RepositoryTests(unittest.TestCase):
         self.assertFalse(state.can_pull)
         self.assertEqual(pull_repository(self.clone).action, "Übersprungen")
 
+    def test_local_changes_show_distinct_remote_status(self) -> None:
+        # A generated untracked PDF must not imply that a remote pull is due.
+        pdf = self.clone / "script_student.pdf"
+        pdf.write_bytes(b"%PDF-1.4")
+        current = inspect_repository(self.clone, fetch=False)
+        self.assertEqual(current.status, "Lokal geändert · Aktuell")
+        self.assertTrue(current.dirty)
+        self.assertEqual(current.behind, 0)
+        self.make_remote_commit()
+        pending = inspect_repository(self.clone, fetch=True)
+        self.assertEqual(pending.status, "Lokal geändert · Pull möglich")
+        self.assertEqual(pending.behind, 1)
+        self.assertFalse(pending.can_pull)  # Explicit approval remains mandatory.
+        preview = prepare_pull(self.clone)
+        self.assertTrue(preview.needs_confirmation)
+        self.assertTrue(preview.safe_to_continue)
+
+    def test_local_commits_are_not_reported_as_remote_up_to_date(self) -> None:
+        (self.clone / "local_commit.txt").write_text("local")
+        git(self.clone, "add", "local_commit.txt")
+        git(self.clone, "commit", "-m", "local commit")
+        (self.clone / "script_student.pdf").write_bytes(b"%PDF-1.4")
+        result = inspect_repository(self.clone, fetch=False)
+        self.assertEqual(result.status, "Lokal geändert · Lokal voraus")
+        self.assertEqual((result.ahead, result.behind), (1, 0))
+
     def test_untracked_latex_pdfs_survive_approved_fast_forward(self) -> None:
         self.make_remote_commit()
         pdf = self.clone / "Script-Beamer" / "Vorlesung_student_de.pdf"
