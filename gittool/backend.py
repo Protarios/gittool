@@ -246,7 +246,12 @@ def inspect_repository(value: str | Path, *, fetch: bool = True) -> RepositorySt
     if ahead and behind:
         status, detail = "Divergiert", "Lokale und entfernte Commits: manuell lösen."
     elif dirty:
-        status, detail = "Lokale Änderungen", "Uncommittete/geänderte Dateien: Pull gesperrt."
+        status = "Lokale Änderungen"
+        detail = (
+            "Lokale Änderungen: Fast-Forward nach Dateiprüfung und Bestätigung möglich."
+            if behind > 0 and ahead == 0 else
+            "Lokale Änderungen vorhanden; kein sicherer Fast-Forward ausstehend."
+        )
     elif ahead:
         status, detail = "Nur lokal voraus", "Lokale Commits vorhanden; kein automatischer Pull."
     elif behind:
