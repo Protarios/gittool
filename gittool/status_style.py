@@ -14,6 +14,7 @@ def visual_status(status: str) -> tuple[str, str, str]:
         "Detached HEAD": ("Detached HEAD", "error", "dialog-error-symbolic"),
         "Kein Remote": ("Kein Remote", "warn", "dialog-warning-symbolic"),
         "Kein Upstream": ("Kein Upstream", "warn", "dialog-warning-symbolic"),
+        "Tracking-Ref fehlt": ("Tracking-Ref fehlt", "warn", "dialog-warning-symbolic"),
         "Fehler": ("Fehler", "error", "dialog-error-symbolic"),
         "Nicht geprüft": ("Nicht geprüft", "muted", "dialog-question-symbolic"),
     }
