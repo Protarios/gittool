@@ -118,44 +118,66 @@ def discover_repositories(root: Path) -> list[Path]:
     return sorted(paths, key=lambda p: str(p).casefold())
 
 
-def inspect_repository(value: str | Path, *, fetch: bool = True) -> RepositoryState:
-    """Refresh remote refs, then inspect branch, tree and ahead/behind counts.
+def _read_local_status(path: Path) -> tuple[str, str, bool, int, int]:
+    """Read branch, upstream, ahead/behind and dirty state in one Git process.
 
-    Never changes the current branch, index or working tree.
+    Porcelain v2 output is a documented stable machine-readable interface.
+    Keeping the worktree checks intact avoids weakening pull safeguards.
+    """
+    result = _git(
+        path, "status", "--porcelain=v2", "--branch", "--untracked-files=normal",
+    )
+    head = ""
+    upstream = ""
+    ahead = behind = 0
+    dirty = False
+    for line in result.stdout.splitlines():
+        if line.startswith("# branch.head "):
+            head = line[len("# branch.head "):]
+        elif line.startswith("# branch.upstream "):
+            upstream = line[len("# branch.upstream "):]
+        elif line.startswith("# branch.ab "):
+            fields = line[len("# branch.ab "):].split()
+            if len(fields) != 2:
+                raise GitToolError("Ungültige Ahead/Behind-Angabe von Git.")
+            ahead, behind = int(fields[0]), -int(fields[1])
+        elif line and not line.startswith("# "):
+            dirty = True
+    if not head:
+        raise GitToolError("Git hat keinen Branch-Status geliefert.")
+    return head, upstream, dirty, ahead, behind
+
+
+def inspect_repository(value: str | Path, *, fetch: bool = True) -> RepositoryState:
+    """Inspect a worktree with minimal Git calls; fetch only when requested.
+
+    This does not switch branches or modify tracked files. A remote fetch can
+    change remote-tracking refs, exactly as before.
     """
     path = normalize_repository(value)
-    flags = git_operations.get_repo_status(path, timeout=LOCAL_TIMEOUT)
-    branch = git_operations.get_current_branch(path, timeout=LOCAL_TIMEOUT)
-    porcelain = _git(path, "status", "--porcelain=v1", "--untracked-files=normal").stdout
-    dirty = bool(porcelain.strip())
+    branch, upstream, dirty, ahead, behind = _read_local_status(path)
 
-    if flags["is_detached"] or branch is None:
-        return RepositoryState(path, branch="(detached)", dirty=dirty,
-                               status="Detached HEAD", detail="Kein Pull auf detached HEAD.")
-    if not flags["has_remote"]:
-        return RepositoryState(path, branch=branch, dirty=dirty,
-                               status="Kein Remote", detail="Kein Remote konfiguriert.")
-
-    upstream_result = _git(
-        path, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}",
-        check=False,
-    )
-    if upstream_result.returncode != 0:
-        return RepositoryState(path, branch=branch, dirty=dirty,
-                               status="Kein Upstream", detail="Tracking-Branch fehlt.")
-
-    upstream = upstream_result.stdout.strip()
+    if branch == "(detached)":
+        return RepositoryState(
+            path, branch=branch, dirty=dirty,
+            status="Detached HEAD", detail="Kein Pull auf detached HEAD.",
+        )
+    if not upstream:
+        has_remote = bool(_git(path, "remote").stdout.strip())
+        return RepositoryState(
+            path, branch=branch, dirty=dirty,
+            status="Kein Upstream" if has_remote else "Kein Remote",
+            detail="Tracking-Branch fehlt." if has_remote else "Kein Remote konfiguriert.",
+        )
     if fetch:
-        # Fetch only the upstream's configured remote. Some branches track a
-        # local branch (remote='.'), for which network fetch is inappropriate.
-        remote = _git(path, "config", "--get", f"branch.{branch}.remote", check=False).stdout.strip()
+        # Match Git's actual branch config, not just the visible upstream name:
+        # remotes may contain '/' and a branch can track a local branch.
+        remote = _git(
+            path, "config", "--get", f"branch.{branch}.remote", check=False,
+        ).stdout.strip()
         if remote and remote != ".":
             _git(path, "fetch", "--prune", "--no-tags", remote, timeout=NETWORK_TIMEOUT)
-
-    counts = _git(path, "rev-list", "--left-right", "--count", "HEAD...@{upstream}").stdout.split()
-    if len(counts) != 2:
-        raise GitToolError("Ungültige Ahead/Behind-Angabe von Git.")
-    ahead, behind = (int(x) for x in counts)
+            branch, upstream, dirty, ahead, behind = _read_local_status(path)
 
     if ahead and behind:
         status, detail = "Divergiert", "Lokale und entfernte Commits: manuell lösen."
