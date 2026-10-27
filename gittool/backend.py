@@ -15,6 +15,11 @@ from typing import Iterator
 
 from gittyup import git_operations, scanner
 
+from .git_process import configure_gittyup, run_git
+
+# Install per-Git-process console suppression before any Gittyup status/pull.
+configure_gittyup()
+
 
 LOCAL_TIMEOUT = 20
 NETWORK_TIMEOUT = 120
@@ -53,7 +58,7 @@ def _git(path: Path, *args: str, timeout: int = LOCAL_TIMEOUT, check: bool = Tru
     """Run a Git command without an interactive terminal prompt."""
     env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
     try:
-        result = subprocess.run(
+        result = run_git(
             ["git", *args],
             cwd=path,
             capture_output=True,
@@ -113,49 +118,149 @@ def discover_repositories(root: Path) -> list[Path]:
     return sorted(paths, key=lambda p: str(p).casefold())
 
 
-def inspect_repository(value: str | Path, *, fetch: bool = True) -> RepositoryState:
-    """Refresh remote refs, then inspect branch, tree and ahead/behind counts.
+def _read_local_status(path: Path) -> tuple[str, str, bool, int | None, int | None]:
+    """Read stable Git porcelain v2 status and potentially absent branch.ab.
 
-    Never changes the current branch, index or working tree.
+    Git may report branch.upstream while omitting branch.ab if the
+    remote-tracking ref has not been fetched. Missing counters are unknown,
+    never automatically treated as +0/-0 (up-to-date).
+    """
+    result = _git(
+        path, "status", "--porcelain=v2", "--branch", "--untracked-files=normal",
+    )
+    head = upstream = ""
+    ahead: int | None = None
+    behind: int | None = None
+    dirty = False
+    for line in result.stdout.splitlines():
+        if line.startswith("# branch.head "):
+            head = line[len("# branch.head "):]
+        elif line.startswith("# branch.upstream "):
+            upstream = line[len("# branch.upstream "):]
+        elif line.startswith("# branch.ab "):
+            fields = line[len("# branch.ab "):].split()
+            if len(fields) != 2:
+                raise GitToolError("Ungültige Ahead/Behind-Angabe von Git.")
+            ahead, behind = int(fields[0]), -int(fields[1])
+        elif line and not line.startswith("# "):
+            dirty = True
+    if not head:
+        raise GitToolError("Git hat keinen Branch-Status geliefert.")
+    return head, upstream, dirty, ahead, behind
+
+
+def _upstream_config(path: Path, branch: str) -> tuple[str, str]:
+    """Read the canonical per-branch Git configuration without guessing."""
+    remote = _git(
+        path, "config", "--get", f"branch.{branch}.remote", check=False,
+    ).stdout.strip()
+    merge = _git(
+        path, "config", "--get", f"branch.{branch}.merge", check=False,
+    ).stdout.strip()
+    return remote, merge
+
+
+def _resolve_upstream(path: Path) -> str:
+    """Ask Git to resolve the tracking ref if porcelain omitted it."""
+    result = _git(
+        path, "rev-parse", "--abbrev-ref", "--symbolic-full-name",
+        "@{upstream}", check=False,
+    )
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def inspect_repository(value: str | Path, *, fetch: bool = True) -> RepositoryState:
+    """Inspect branch and tracking relationship; never merge or switch branches.
+
+    Fetch existing configured remotes even when upstream is not currently
+    resolvable, because an unfetched tracking ref should not be mistaken
+    for an unset branch configuration.
     """
     path = normalize_repository(value)
-    flags = git_operations.get_repo_status(path, timeout=LOCAL_TIMEOUT)
-    branch = git_operations.get_current_branch(path, timeout=LOCAL_TIMEOUT)
-    porcelain = _git(path, "status", "--porcelain=v1", "--untracked-files=normal").stdout
-    dirty = bool(porcelain.strip())
+    branch, upstream, dirty, ahead, behind = _read_local_status(path)
 
-    if flags["is_detached"] or branch is None:
-        return RepositoryState(path, branch="(detached)", dirty=dirty,
-                               status="Detached HEAD", detail="Kein Pull auf detached HEAD.")
-    if not flags["has_remote"]:
-        return RepositoryState(path, branch=branch, dirty=dirty,
-                               status="Kein Remote", detail="Kein Remote konfiguriert.")
+    if branch == "(detached)":
+        return RepositoryState(
+            path, branch=branch, dirty=dirty,
+            status="Detached HEAD", detail="Kein Pull auf detached HEAD.",
+        )
 
-    upstream_result = _git(
-        path, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}",
-        check=False,
-    )
-    if upstream_result.returncode != 0:
-        return RepositoryState(path, branch=branch, dirty=dirty,
-                               status="Kein Upstream", detail="Tracking-Branch fehlt.")
+    remote = merge = ""
+    if not upstream or ahead is None or behind is None or fetch:
+        remote, merge = _upstream_config(path, branch)
 
-    upstream = upstream_result.stdout.strip()
-    if fetch:
-        # Fetch only the upstream's configured remote. Some branches track a
-        # local branch (remote='.'), for which network fetch is inappropriate.
-        remote = _git(path, "config", "--get", f"branch.{branch}.remote", check=False).stdout.strip()
-        if remote and remote != ".":
-            _git(path, "fetch", "--prune", "--no-tags", remote, timeout=NETWORK_TIMEOUT)
+    if fetch and remote and remote != ".":
+        # Fetch tracking refs before classification; never touches the worktree.
+        _git(path, "fetch", "--prune", "--no-tags", remote, timeout=NETWORK_TIMEOUT)
+        branch, upstream, dirty, ahead, behind = _read_local_status(path)
 
-    counts = _git(path, "rev-list", "--left-right", "--count", "HEAD...@{upstream}").stdout.split()
-    if len(counts) != 2:
-        raise GitToolError("Ungültige Ahead/Behind-Angabe von Git.")
-    ahead, behind = (int(x) for x in counts)
+    if not upstream:
+        upstream = _resolve_upstream(path)
+
+    if not upstream:
+        if remote and merge:
+            # push --set-upstream may configure origin/WiSe26 even when
+            # remote.origin.fetch does not map that ref locally.
+            configured = (
+                f"{remote}/{merge.removeprefix('refs/heads/')}"
+                if merge.startswith("refs/heads/") and remote != "." else merge
+            )
+            return RepositoryState(
+                path, branch=branch, upstream=configured, dirty=dirty,
+                status="Tracking-Ref fehlt",
+                detail=(
+                    f"Tracking-Branch konfiguriert ({configured}), aber nicht "
+                    f"auflösbar. Remote-Fetch-Refspec prüfen. Repository: {path}"
+                ),
+            )
+        has_remote = bool(_git(path, "remote").stdout.strip())
+        return RepositoryState(
+            path, branch=branch, dirty=dirty,
+            status="Kein Upstream" if has_remote else "Kein Remote",
+            detail=(
+                f"Kein Tracking-Branch für {branch} konfiguriert. Repository: {path}"
+                if has_remote else f"Kein Remote konfiguriert. Repository: {path}"
+            ),
+        )
+
+    if ahead is None or behind is None:
+        # branch.upstream may exist without the remote-tracking ref.
+        counts = _git(
+            path, "rev-list", "--left-right", "--count",
+            "HEAD...@{upstream}", check=False,
+        )
+        if counts.returncode != 0:
+            return RepositoryState(
+                path, branch=branch, upstream=upstream, dirty=dirty,
+                status="Tracking-Ref fehlt",
+                detail=(
+                    f"Tracking-Branch {upstream} ist konfiguriert, dessen "
+                    f"Referenz ist aber lokal nicht verfügbar. Repository: {path}"
+                ),
+            )
+        fields = counts.stdout.split()
+        if len(fields) != 2:
+            raise GitToolError("Ungültige Ahead/Behind-Angabe von Git.")
+        ahead, behind = (int(x) for x in fields)
 
     if ahead and behind:
         status, detail = "Divergiert", "Lokale und entfernte Commits: manuell lösen."
+    elif dirty and behind and not ahead:
+        status = "Lokal geändert · Pull möglich"
+        detail = (
+            f"{behind} entfernte(s) Commit(s) verfügbar. "
+            "Fast-Forward nach Dateiprüfung und Bestätigung möglich."
+        )
+    elif dirty and ahead:
+        status, detail = (
+            "Lokal geändert · Lokal voraus",
+            "Lokale Änderungen und eigene Commits vorhanden; kein automatischer Pull.",
+        )
     elif dirty:
-        status, detail = "Lokale Änderungen", "Uncommittete/geänderte Dateien: Pull gesperrt."
+        status, detail = (
+            "Lokal geändert · Aktuell",
+            "Lokale Änderungen vorhanden; keine entfernten Commits ausstehend.",
+        )
     elif ahead:
         status, detail = "Nur lokal voraus", "Lokale Commits vorhanden; kein automatischer Pull."
     elif behind:
@@ -169,6 +274,103 @@ def inspect_repository(value: str | Path, *, fetch: bool = True) -> RepositorySt
         status=status, detail=detail,
         can_pull=(not dirty and ahead == 0 and behind > 0),
     )
+
+
+
+@dataclass(frozen=True)
+class LocalChange:
+    """One changed path, preserving its Git status code for the review dialog."""
+    status: str
+    path: str
+
+
+@dataclass(frozen=True)
+class PullPreview:
+    """Immutable result of a fetch + fast-forward and local-path safety check."""
+    state: RepositoryState
+    changes: tuple[LocalChange, ...] = ()
+    overlaps: tuple[str, ...] = ()
+    head_oid: str = ""
+    target_oid: str = ""
+
+    @property
+    def needs_confirmation(self) -> bool:
+        return bool(
+            self.state.dirty and self.state.ahead == 0
+            and self.state.behind > 0 and self.state.upstream
+            and self.head_oid and self.target_oid
+        )
+
+    @property
+    def safe_to_continue(self) -> bool:
+        return self.needs_confirmation and not self.overlaps
+
+
+def _local_changes(path: Path) -> tuple[LocalChange, ...]:
+    """Parse -z porcelain to avoid quoted path ambiguities and list ALL PDFs."""
+    result = _git(
+        path, "status", "--porcelain=v1", "-z",
+        "--untracked-files=all", "--ignore-submodules=none",
+    )
+    parts = result.stdout.split("\0")
+    changes: list[LocalChange] = []
+    index = 0
+    while index < len(parts):
+        entry = parts[index]
+        index += 1
+        if not entry:
+            continue
+        if len(entry) < 4 or entry[2] != " ":
+            raise GitToolError("Ungültige Dateiliste von git status.")
+        code = entry[:2]
+        name = entry[3:]
+        changes.append(LocalChange(code, name))
+        # Porcelain v1 -z puts the second pathname directly after a
+        # rename/copy entry (new path first, original path second).
+        if "R" in code or "C" in code:
+            if index >= len(parts) or not parts[index]:
+                raise GitToolError("Unvollständiger Git-Rename-/Copy-Eintrag.")
+            changes.append(LocalChange(code, parts[index]))
+            index += 1
+    return tuple(changes)
+
+
+def _path_overlap(left: str, right: str) -> bool:
+    """Conservatively catch identical paths and file/directory replacements."""
+    # Git tree paths always use '/' regardless of host OS.
+    a = left.replace("\\", "/").rstrip("/")
+    b = right.replace("\\", "/").rstrip("/")
+    if os.name == "nt":
+        a, b = a.casefold(), b.casefold()
+    return a == b or a.startswith(b + "/") or b.startswith(a + "/")
+
+
+def _incoming_changed_paths(path: Path) -> tuple[str, ...]:
+    """All tree paths changed by the incoming fast-forward, including deletions."""
+    result = _git(
+        path, "diff", "--name-only", "-z", "--no-renames",
+        "--ignore-submodules=none", "HEAD", "@{upstream}",
+    )
+    return tuple(p for p in result.stdout.split("\0") if p)
+
+
+def prepare_pull(value: str | Path) -> PullPreview:
+    """Fetch first, then provide a bounded, read-only local-change review."""
+    state = inspect_repository(value, fetch=True)
+    if not (state.dirty and state.ahead == 0 and state.behind > 0 and state.upstream):
+        return PullPreview(state)
+    changes = _local_changes(state.path)
+    if not changes:
+        raise GitToolError("Lokale Änderungen konnten nicht vollständig erfasst werden.")
+    incoming = _incoming_changed_paths(state.path)
+    overlaps = tuple(sorted({
+        change.path
+        for change in changes
+        if any(_path_overlap(change.path, modified) for modified in incoming)
+    }))
+    head = _git(state.path, "rev-parse", "HEAD").stdout.strip()
+    target = _git(state.path, "rev-parse", "@{upstream}").stdout.strip()
+    return PullPreview(state, changes, overlaps, head, target)
 
 
 @contextmanager
@@ -203,22 +405,82 @@ def _fast_forward_only_environment() -> Iterator[None]:
                 os.environ[name] = value
 
 
-def pull_repository(value: str | Path) -> PullOutcome:
-    """Fetch, check safety preconditions, then pull through gittyup.
+def pull_repository(
+    value: str | Path, *, approved_preview: PullPreview | None = None,
+    checked_state: RepositoryState | None = None,
+) -> PullOutcome:
+    """Fast-forward only; permit safe dirty trees with explicit prior approval.
 
-    Dirty, detached, nontracking, ahead and diverged repositories are skipped.
+    For approved dirty worktrees, merge the *already fetched exact commit*,
+    rather than running a second network fetch inside gittyup. The preflight
+    checks incoming changed paths and Git itself refuses local overwrites.
     """
     with _PULL_LOCK:
-        before = inspect_repository(value, fetch=True)
+        if approved_preview is not None:
+            if not approved_preview.safe_to_continue:
+                raise GitToolError("Ein Pull mit kollidierenden lokalen Änderungen ist gesperrt.")
+            path = normalize_repository(value)
+            if path != approved_preview.state.path:
+                raise GitToolError("Repository-Pfad hat sich seit der Freigabe geändert.")
+            # Reinspect immediately before updating (including status, refs).
+            before = inspect_repository(path, fetch=False)
+            if not (
+                before.dirty and before.ahead == 0 and before.behind > 0
+                and before.upstream == approved_preview.state.upstream
+                and before.branch == approved_preview.state.branch
+                and _git(path, "rev-parse", "HEAD").stdout.strip()
+                    == approved_preview.head_oid
+                and _git(path, "rev-parse", "@{upstream}").stdout.strip()
+                    == approved_preview.target_oid
+            ):
+                raise GitToolError(
+                    "Git-Stand hat sich seit der Bestätigung geändert. "
+                    "Bitte erneut prüfen und bestätigen."
+                )
+            current_changes = _local_changes(path)
+            if current_changes != approved_preview.changes:
+                raise GitToolError(
+                    "Lokale Dateiliste hat sich seit der Bestätigung geändert. "
+                    "Bitte erneut prüfen und bestätigen."
+                )
+            if any(
+                _path_overlap(change.path, incoming)
+                for change in current_changes
+                for incoming in _incoming_changed_paths(path)
+            ):
+                raise GitToolError("Dateiüberschneidung erkannt; Pull sicherheitshalber abgebrochen.")
+            # A fast-forward move to a pinned object is equivalent to fetch +
+            # ff-only pull, without a second fetch invalidating the preview.
+            # Git refuses to overwrite local changes even in unforeseen cases.
+            result = _git(
+                path, "-c", "merge.autoStash=false",
+                "merge", "--ff-only", approved_preview.target_oid,
+                timeout=NETWORK_TIMEOUT,
+            )
+            after = inspect_repository(path, fetch=False)
+            return PullOutcome(
+                after, "Aktualisiert",
+                (result.stdout + result.stderr).strip()
+                or "Fast-forward erfolgreich; lokale Dateien unverändert.",
+            )
+
+        before = checked_state if checked_state is not None else inspect_repository(value, fetch=True)
+        if checked_state is not None and normalize_repository(value) != before.path:
+            raise GitToolError("Repository-Pfad der Vorprüfung stimmt nicht überein.")
         if not before.can_pull:
             action = "Aktuell" if before.status == "Aktuell" else "Übersprungen"
+            if before.dirty and before.behind > 0 and before.ahead == 0:
+                return PullOutcome(
+                    before, "Übersprungen",
+                    "Lokale Änderungen: Pull nur nach Prüfung und Bestätigung möglich.",
+                )
             return PullOutcome(before, action, before.detail)
 
-        # gittyup's public API parses pull output and commit/file statistics.
-        # Its default implementation calls plain 'git pull', therefore force
-        # ff-only in the child Git process rather than altering local config.
+        # Keep clean worktrees on gittyup's existing, proven ff-only path.
         with _fast_forward_only_environment():
-            result = git_operations.pull_repository_detailed(before.path, timeout=NETWORK_TIMEOUT)
+            result = git_operations.pull_repository_detailed(
+                before.path, timeout=NETWORK_TIMEOUT,
+            )
 
         if not result.success:
             detail = result.error_details or result.error_message or "Unbekannter Pull-Fehler"
