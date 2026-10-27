@@ -29,6 +29,18 @@ wie der DAR Explorer auf PyGObject / GTK 4.
 - Gespeicherte Repository-Pfade werden aus der vorherigen Tkinter-Version
   unverändert übernommen.
 
+## Programmsymbol
+
+Die Linux-GTK-Version verwendet dasselbe transparente GitTool-Icon wie die
+Qt-Version: `gittool/assets/gittool.png`. Es ist als Python-Paketressource
+enthalten und wird beim Start in den GTK-Icon-Suchpfad aufgenommen sowie als
+Fenster-Icon (`gittool`) gesetzt, unabhängig vom Arbeitsverzeichnis.
+
+Auf Wayland-/GNOME-Desktops kann für die korrekte Darstellung im
+Anwendungsmenü zusätzlich ein installierter Desktop-Eintrag mit
+`Icon=gittool` und einer passenden Datei im Hicolor-Icon-Thema erforderlich
+sein. Der Qt-Windows-Build verwendet denselben Bildentwurf für seine EXE.
+
 ## Reihenfolge und Submodule
 
 Die Repository-Liste speichert jetzt eine **manuell festgelegte Reihenfolge**.
