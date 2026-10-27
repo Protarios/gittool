@@ -19,3 +19,6 @@ gittool = "gittool.app:main"
 
 [tool.setuptools.packages.find]
 include = ["gittool*"]
+
+[tool.setuptools.package-data]
+gittool = ["assets/*.png"]
