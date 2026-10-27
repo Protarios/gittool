@@ -89,6 +89,28 @@ zu setzen oder `gi` zu installieren.
 Die automatisierten GUI- und Backend-Tests laufen für **Linux und Windows**
 mit **Python 3.13 und 3.14** (Qt unter Linux im Headless-Modus).
 
+## Geschwindigkeit und Statusprüfung
+
+- **Schneller Programmstart:** Die gespeicherten Repositories werden in einem
+  Durchgang angezeigt. Die initialisierten Submodule werden im Hintergrund
+  geprüft und bei Bedarf anschließend ergänzt. Die Oberfläche wartet dabei
+  nicht auf Git-Prozesse.
+- **Lokal prüfen:** Schneller Statuscheck ohne `git fetch`. Zeigt den Stand der
+  *zuletzt lokal bekannten Remote-Tracking-Refs* an; neue Commits auf dem
+  Server erscheinen erst nach einem Fetch.
+- **Alle prüfen:** Führt weiterhin `git fetch` aus, prüft jedoch bis zu vier
+  voneinander unabhängige Repositories parallel. Laufzeit hängt von Netzwerk,
+  Repository-Größe und Anmeldedaten ab.
+- **Prüfen + Pull:** Bleibt absichtlich sequenziell und erzwingt weiterhin
+  Fast-Forward-only und ein sauberes Arbeitsverzeichnis. GitTool führt
+  keine parallelen Pulls in zusammenhängenden Worktrees aus.
+- **Schnellerer lokaler Git-Status:** Die Angaben für Branch, Upstream,
+  Ahead/Behind und lokale Änderungen kommen aus `git status --porcelain=v2`
+  statt aus mehreren separaten Git-Aufrufen.
+
+Der schnelle Lokalmodus kann ohne Netzwerkverbindung benutzt werden;
+er ersetzt keine Aktualisierung der Remote-Tracking-Refs.
+
 ## Reihenfolge und Submodule
 
 Die Repository-Liste speichert jetzt eine **manuell festgelegte Reihenfolge**.
