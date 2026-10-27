@@ -216,6 +216,21 @@ Bei **sauberem Arbeitsverzeichnis** und `ahead=0`, `behind>0` verwendet
 GitTool weiterhin `gittyup.git_operations.pull_repository_detailed()`
 mit erzwungenem `pull.ff=only`.
 
+### Getrennte Statusanzeigen bei lokalen Änderungen
+
+Die Statusspalte unterscheidet ausdrücklich:
+
+- **Lokal geändert · Aktuell:** Dateien sind lokal geändert oder unversioniert,
+  aber es sind keine Remote-Commits ausstehend.
+- **Lokal geändert · Pull möglich:** Remote-Commits sind vorhanden und lokale
+  Dateien sind geändert/unversioniert. Der Pull kann nach der Dateiprüfung
+  und ausdrücklicher Bestätigung erfolgen, wenn keine Pfade kollidieren.
+- **Lokal geändert · Lokal voraus:** Lokal geänderte Dateien und eigene
+  Commits, aber kein sicherer automatischer Fast-Forward.
+
+Die blaue Kennzeichnung für einen anstehenden Pull hebt die
+Bestätigungspflicht nicht auf.
+
 ### Pull trotz lokaler Dateien (z. B. generierte LaTeX-PDFs)
 
 Wenn eingehende Commits vorhanden sind und GitTool **lokale Änderungen**
