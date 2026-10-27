@@ -441,22 +441,61 @@ class GitToolWindow(QMainWindow):
         self._log(f"{len(removed)} Repository(s) aus der Liste entfernt (keine Dateien gelöscht).")
 
     def _load_saved(self) -> None:
+        """Load cached hierarchy in one UI update, without starting git.exe."""
         try:
             entries = load_repository_entries()
         except (OSError, ValueError) as exc:
             self._log(f"FEHLER beim Lesen von {default_config_path()}: {exc}")
-            QMessageBox.warning(self, "Konfiguration",
-                                f"Repositories konnten nicht geladen werden:\n{exc}")
+            QMessageBox.warning(
+                self, "Konfiguration", f"Repositories konnten nicht geladen werden:\n{exc}"
+            )
             return
-        for entry in entries:
-            self._register_repository(entry.path, parent=entry.parent,
-                                      persist=False, discover=False)
-        roots = [entry.path for entry in self.catalog.entries if entry.parent is None]
-        for root in roots:
-            self._register_repository(root, persist=False, discover=True)
-        if self.catalog.entries != entries:
-            self._save()
+        self.catalog = RepositoryCatalog(entries)
+        self._rebuild_tree()
         self._log(f"{len(self.repositories)} Repository(s) aus der Konfiguration geladen.")
+        # Discover newly initialized submodules *after* the Qt event loop starts,
+        # so a large library never blocks the main window from appearing.
+        roots = [entry.path for entry in self.catalog.entries if entry.parent is None]
+        if roots:
+            QTimer.singleShot(0, lambda: self._schedule_submodule_scan(roots))
+
+    def _schedule_submodule_scan(self, roots: list[Path]) -> None:
+        """Run read-only Gitlink discovery outside the GUI/main worker queue."""
+        if not roots:
+            return
+        try:
+            self.submodule_executor.submit(self._discover_submodules_worker, list(roots))
+        except RuntimeError as exc:
+            self._log(f"Submodule-Prüfung konnte nicht gestartet werden: {exc}")
+
+    def _discover_submodules_worker(self, roots: list[Path]) -> None:
+        discovered: list[tuple[Path, Path]] = []
+        errors: list[str] = []
+        for root in roots:
+            try:
+                discovered.extend(discover_submodules(root))
+            except (GitToolError, OSError) as exc:
+                errors.append(f"{root}: {exc}")
+        self.events.submodules.emit((discovered, errors))
+
+    def _on_submodules(self, report: tuple[list[tuple[Path, Path]], list[str]]) -> None:
+        """Batch all discovered links into one tree rebuild and one save."""
+        discovered, errors = report
+        changed = 0
+        for child, parent in discovered:
+            if not self.catalog.has(parent):
+                continue  # The parent may have been removed while scanning.
+            if not self.catalog.has(child):
+                self.catalog.add(child, parent)
+                changed += 1
+            elif self.catalog.attach(child, parent):
+                changed += 1
+        if changed:
+            self._rebuild_tree()
+            self._save()
+            self._log(f"Submodule-Erkennung: {changed} neue/zugeordnete Einträge.")
+        for error in errors:
+            self._log(f"Submodule-Prüfung: {error}")
 
     def _save(self) -> None:
         try:
