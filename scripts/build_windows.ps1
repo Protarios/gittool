@@ -22,15 +22,20 @@ if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
 & python -m pip install -e .
 if ($LASTEXITCODE -ne 0) { throw "Installation von GitTool fehlgeschlagen." }
 
-& python -m pip install --upgrade pyinstaller
-if ($LASTEXITCODE -ne 0) { throw "Installation von PyInstaller fehlgeschlagen." }
+& python -m pip install --upgrade pyinstaller pillow
+if ($LASTEXITCODE -ne 0) { throw "Installation von PyInstaller/Pillow fehlgeschlagen." }
+
+& python scripts/create_icons.py
+if ($LASTEXITCODE -ne 0) { throw "Erstellung des Windows-Icons fehlgeschlagen." }
 
 $options = @(
     "--noconfirm", "--clean",
     "--windowed",
+    "--icon", "build\\icons\\GitTool.ico",
     "--name", "GitTool",
     "--paths", ".",
-    "--collect-submodules", "gittyup"
+    "--collect-submodules", "gittyup",
+    "--collect-data", "gittool"
 )
 if ($Layout -eq "onefile") {
     $options += "--onefile"
