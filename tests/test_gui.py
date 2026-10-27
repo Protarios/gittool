@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import os
+import threading
+import time
 from pathlib import Path
 import tempfile
 import unittest
@@ -16,6 +18,7 @@ from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from gittool.app import GitToolWindow  # noqa: E402
 from gittool.backend import RepositoryState  # noqa: E402
+from gittool.repository_catalog import RepositoryEntry  # noqa: E402
 from gittool.status_style import visual_status  # noqa: E402
 
 
@@ -109,6 +112,49 @@ class QtGuiTests(unittest.TestCase):
             self.window._move_selected(+1)
         self.assertEqual(self.window.repositories, [sibling, parent, child])
         self.assertEqual(self.window.catalog.find(child).parent, parent)
+
+    def test_startup_does_not_start_git_or_rebuild_for_every_saved_entry(self) -> None:
+        parents = [self.path.parent / f"saved-{index}" for index in range(12)]
+        entries = [RepositoryEntry(path) for path in parents]
+        with (
+            patch("gittool.app.load_repository_entries", return_value=entries),
+            patch("gittool.app.discover_submodules") as discovery,
+            patch("gittool.app.QTimer.singleShot") as schedule,
+        ):
+            other = GitToolWindow()
+        try:
+            self.assertEqual(other.repositories, parents)
+            self.assertEqual(other.tree.topLevelItemCount(), len(parents))
+            discovery.assert_not_called()
+            schedule.assert_called_once()
+        finally:
+            other.close()
+            import shiboken6
+            shiboken6.delete(other)
+
+    def test_parallel_checks_keep_network_fetch_optional(self) -> None:
+        paths = [self.path.parent / f"check-{index}" for index in range(6)]
+        lock = threading.Lock()
+        active = 0
+        peak = 0
+        calls = []
+
+        def inspect(path: Path, *, fetch: bool) -> RepositoryState:
+            nonlocal active, peak
+            with lock:
+                active += 1
+                peak = max(peak, active)
+                calls.append((path, fetch))
+            time.sleep(0.04)
+            with lock:
+                active -= 1
+            return RepositoryState(path=path)
+
+        with patch("gittool.app.inspect_repository", side_effect=inspect):
+            self.window._work("quick_check", paths)
+        self.assertEqual(len(calls), len(paths))
+        self.assertTrue(all(not fetch for _, fetch in calls))
+        self.assertGreaterEqual(peak, 2)
 
     def test_visual_status_categories(self) -> None:
         expectations = {
