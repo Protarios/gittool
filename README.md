@@ -167,9 +167,31 @@ Start die Python- und Qt-Bibliotheken in ein temporäres Verzeichnis.
 Alternativer manueller Build:
 
 ~~~powershell
-python -m pip install pyinstaller
-python -m PyInstaller --noconfirm --clean --windowed --onedir --name GitTool --paths . --collect-submodules gittyup gittool_launcher.py
+python -m pip install pyinstaller pillow
+python scripts/create_icons.py
+python -m PyInstaller --noconfirm --clean --windowed --onedir --name GitTool --icon build/icons/GitTool.ico --paths . --collect-submodules gittyup --collect-data gittool gittool_launcher.py
 ~~~
+
+### Plattformübergreifendes Programmsymbol
+
+Das ausgewählte GitTool-Icon liegt als transparentes Paket-Asset unter
+`gittool/assets/gittool.png` und ist als Paketdaten in `pyproject.toml`
+eingetragen. Die Qt-Anwendung setzt dieses Symbol sowohl für das
+Programmfenster als auch als Standard-Anwendungssymbol, unabhängig vom
+aktuellen Arbeitsverzeichnis.
+
+- **Windows:** Das Buildskript erstellt mit Pillow automatisch eine ICO-Datei
+  mit 16, 24, 32, 48, 64, 128 und 256 Pixeln und übergibt sie an PyInstaller.
+  Somit besitzt die erzeugte `GitTool.exe` auch im Explorer ihr eigenes Icon.
+- **Linux (Qt):** Beim Start über `gittool` oder `python -m gittool`
+  verwendet das Qt-Fenster dasselbe Symbol. Für Desktop-Menüeinträge muss
+  das PNG gegebenenfalls zusätzlich als System-Icon installiert werden.
+- **macOS (Qt):** Die Laufzeit lädt dasselbe PNG. Bei einem Build auf macOS
+  kann `python scripts/create_icons.py` zusätzlich ein ICNS erzeugen;
+  ein vollständiger macOS-Anwendungsbuild wird noch nicht durch CI geprüft.
+
+Pillow ist nur für die Icon-Erzeugung beim Paketbau nötig, nicht als
+Laufzeitabhängigkeit von GitTool.
 
 GitTool enthält Qt/Python, **nicht Git für Windows**. Auf Zielrechnern
 muss `git.exe` weiterhin über den `PATH` erreichbar sein.
