@@ -118,18 +118,19 @@ def discover_repositories(root: Path) -> list[Path]:
     return sorted(paths, key=lambda p: str(p).casefold())
 
 
-def _read_local_status(path: Path) -> tuple[str, str, bool, int, int]:
-    """Read branch, upstream, ahead/behind and dirty state in one Git process.
+def _read_local_status(path: Path) -> tuple[str, str, bool, int | None, int | None]:
+    """Read stable Git porcelain v2 status and potentially absent branch.ab.
 
-    Porcelain v2 output is a documented stable machine-readable interface.
-    Keeping the worktree checks intact avoids weakening pull safeguards.
+    Git may report branch.upstream while omitting branch.ab if the
+    remote-tracking ref has not been fetched. Missing counters are unknown,
+    never automatically treated as +0/-0 (up-to-date).
     """
     result = _git(
         path, "status", "--porcelain=v2", "--branch", "--untracked-files=normal",
     )
-    head = ""
-    upstream = ""
-    ahead = behind = 0
+    head = upstream = ""
+    ahead: int | None = None
+    behind: int | None = None
     dirty = False
     for line in result.stdout.splitlines():
         if line.startswith("# branch.head "):
@@ -148,11 +149,32 @@ def _read_local_status(path: Path) -> tuple[str, str, bool, int, int]:
     return head, upstream, dirty, ahead, behind
 
 
-def inspect_repository(value: str | Path, *, fetch: bool = True) -> RepositoryState:
-    """Inspect a worktree with minimal Git calls; fetch only when requested.
+def _upstream_config(path: Path, branch: str) -> tuple[str, str]:
+    """Read the canonical per-branch Git configuration without guessing."""
+    remote = _git(
+        path, "config", "--get", f"branch.{branch}.remote", check=False,
+    ).stdout.strip()
+    merge = _git(
+        path, "config", "--get", f"branch.{branch}.merge", check=False,
+    ).stdout.strip()
+    return remote, merge
 
-    This does not switch branches or modify tracked files. A remote fetch can
-    change remote-tracking refs, exactly as before.
+
+def _resolve_upstream(path: Path) -> str:
+    """Ask Git to resolve the tracking ref if porcelain omitted it."""
+    result = _git(
+        path, "rev-parse", "--abbrev-ref", "--symbolic-full-name",
+        "@{upstream}", check=False,
+    )
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def inspect_repository(value: str | Path, *, fetch: bool = True) -> RepositoryState:
+    """Inspect branch and tracking relationship; never merge or switch branches.
+
+    Fetch existing configured remotes even when upstream is not currently
+    resolvable, because an unfetched tracking ref should not be mistaken
+    for an unset branch configuration.
     """
     path = normalize_repository(value)
     branch, upstream, dirty, ahead, behind = _read_local_status(path)
@@ -162,42 +184,64 @@ def inspect_repository(value: str | Path, *, fetch: bool = True) -> RepositorySt
             path, branch=branch, dirty=dirty,
             status="Detached HEAD", detail="Kein Pull auf detached HEAD.",
         )
+
+    remote = merge = ""
+    if not upstream or ahead is None or behind is None or fetch:
+        remote, merge = _upstream_config(path, branch)
+
+    if fetch and remote and remote != ".":
+        # Fetch tracking refs before classification; never touches the worktree.
+        _git(path, "fetch", "--prune", "--no-tags", remote, timeout=NETWORK_TIMEOUT)
+        branch, upstream, dirty, ahead, behind = _read_local_status(path)
+
     if not upstream:
-        # Porcelain v2 does not expose the branch.upstream line in every
-        # configuration (e.g. when its tracking ref has not been fetched).
-        # Ask Git's canonical upstream resolver before classifying the branch.
-        resolved = _git(
-            path, "rev-parse", "--abbrev-ref", "--symbolic-full-name",
-            "@{upstream}", check=False,
-        )
-        if resolved.returncode == 0 and resolved.stdout.strip():
-            upstream = resolved.stdout.strip()
-            counts = _git(
-                path, "rev-list", "--left-right", "--count", "HEAD...@{upstream}",
-            ).stdout.split()
-            if len(counts) != 2:
-                raise GitToolError("Ungültige Ahead/Behind-Angabe von Git.")
-            ahead, behind = (int(value) for value in counts)
-        else:
-            has_remote = bool(_git(path, "remote").stdout.strip())
+        upstream = _resolve_upstream(path)
+
+    if not upstream:
+        if remote and merge:
+            # push --set-upstream may configure origin/WiSe26 even when
+            # remote.origin.fetch does not map that ref locally.
+            configured = (
+                f"{remote}/{merge.removeprefix('refs/heads/')}"
+                if merge.startswith("refs/heads/") and remote != "." else merge
+            )
             return RepositoryState(
-                path, branch=branch, dirty=dirty,
-                status="Kein Upstream" if has_remote else "Kein Remote",
+                path, branch=branch, upstream=configured, dirty=dirty,
+                status="Tracking-Ref fehlt",
                 detail=(
-                    "Kein auflösbarer Tracking-Branch für diesen Branch. "
-                    "Status erneut prüfen, falls der Upstream im Terminal gesetzt wurde."
-                    if has_remote else "Kein Remote konfiguriert."
+                    f"Tracking-Branch konfiguriert ({configured}), aber nicht "
+                    f"auflösbar. Remote-Fetch-Refspec prüfen. Repository: {path}"
                 ),
             )
-    if fetch:
-        # Match Git's actual branch config, not just the visible upstream name:
-        # remotes may contain '/' and a branch can track a local branch.
-        remote = _git(
-            path, "config", "--get", f"branch.{branch}.remote", check=False,
-        ).stdout.strip()
-        if remote and remote != ".":
-            _git(path, "fetch", "--prune", "--no-tags", remote, timeout=NETWORK_TIMEOUT)
-            branch, upstream, dirty, ahead, behind = _read_local_status(path)
+        has_remote = bool(_git(path, "remote").stdout.strip())
+        return RepositoryState(
+            path, branch=branch, dirty=dirty,
+            status="Kein Upstream" if has_remote else "Kein Remote",
+            detail=(
+                f"Kein Tracking-Branch für {branch} konfiguriert. Repository: {path}"
+                if has_remote else f"Kein Remote konfiguriert. Repository: {path}"
+            ),
+        )
+
+    if ahead is None or behind is None:
+        # branch.upstream may exist without the remote-tracking ref.
+        counts = _git(
+            path, "rev-list", "--left-right", "--count",
+            "HEAD...@{upstream}", check=False,
+        )
+        if counts.returncode != 0:
+            return RepositoryState(
+                path, branch=branch, upstream=upstream, dirty=dirty,
+                status="Tracking-Ref fehlt",
+                detail=(
+                    f"Tracking-Branch {upstream} ist konfiguriert, dessen "
+                    f"Referenz ist aber lokal nicht verfügbar. Repository: {path}"
+                ),
+            )
+        fields = counts.stdout.split()
+        if len(fields) != 2:
+            raise GitToolError("Ungültige Ahead/Behind-Angabe von Git.")
+        ahead, behind = (int(x) for x in fields)
 
     if ahead and behind:
         status, detail = "Divergiert", "Lokale und entfernte Commits: manuell lösen."
