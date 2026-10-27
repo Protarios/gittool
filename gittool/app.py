@@ -583,7 +583,7 @@ class GitToolWindow(QMainWindow):
                                 continue
                             outcome = pull_repository(path, approved_preview=preview)
                         else:
-                            outcome = pull_repository(path)
+                            outcome = pull_repository(path, checked_state=preview.state)
                         self.events.outcome.emit(outcome)
                     except Exception as exc:
                         self.events.error.emit(path, str(exc))
