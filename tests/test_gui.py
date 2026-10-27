@@ -48,8 +48,12 @@ class StatusColorTests(unittest.TestCase):
         self.assertIn('gi.require_version("Adw", "1")', code)
         self.assertNotIn("tkinter", code)
 
+    @unittest.skipUnless(os.name != "nt", "GTK-Anwendung wird unter Linux getestet")
     def test_gtk_worker_parallel_local_checks_and_safe_pull_preflight(self) -> None:
-        from gittool.app import GitToolApp
+        try:
+            from gittool.app import GitToolApp
+        except (ImportError, ValueError, SystemExit) as exc:
+            self.skipTest(f"GTK nicht verfügbar: {exc}")
         from gittool.backend import PullPreview, RepositoryState
         from unittest.mock import patch
         import threading
@@ -151,7 +155,7 @@ class StatusColorTests(unittest.TestCase):
                 self.assertTrue(badge.has_css_class("pill-info"))
                 self.assertIn("1 Pull möglich", application.summary.get_text())
                 self.assertIsNotNone(application.quick_check)
-                self.assertFalse(application.window.get_icon_name() != "gittool")
+                self.assertEqual(application.window.get_icon_name(), "gittool")
                 self.assertTrue(indicator.has_css_class("indicator-info"))
                 self.assertIn("origin/gpt", details.get_text())
                 check.set_active(True)
