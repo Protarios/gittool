@@ -16,16 +16,29 @@ wie der DAR Explorer auf PyGObject / GTK 4.
   Branch, Upstream oder Status.
 - Statusprüfung per Fetch sowie Anzeige von Branch, Upstream, Ahead/Behind und
   lokalen Änderungen.
-- **Auswahl prüfen**, **Alle prüfen**, **Auswahl prüfen + Pull** und
-  **Alle prüfen + Pull**, mit Fortschrittsanzeige und Protokoll.
+- **Auswahl prüfen**, **Alle prüfen**, **Lokal prüfen** (ohne Netzwerk),
+  **Auswahl prüfen + Pull** und **Alle prüfen + Pull**, mit Fortschrittsanzeige
+  und Protokoll. Statusprüfungen laufen mit bis zu vier parallelen Workern.
+  Der eigentliche Pull bleibt aus Sicherheitsgründen sequenziell.
 - **Farbcodierung über libadwaita-Themenfarben:** Grün = aktuell,
   Blau = Pull möglich, Orange = lokale Änderungen / lokale Commits /
   fehlender Upstream, Rot = divergiert, detached HEAD oder Git-Fehler,
   Grau = ungeprüft. Die Zustände stehen zusätzlich als Klartext da
   (auch ohne Farbwahrnehmung unterscheidbar).
-- Sichere Aktualisierung: Gittyup zieht nur über ein sauberes Arbeitsverzeichnis
-  mit Upstream und Fast-Forward. Divergenzen und uncommittete Änderungen
-  werden nicht automatisch gemergt oder verworfen.
+- **Sichere Aktualisierung auch bei lokalen Änderungen:** Generierte,
+  unversionierte PDF-Dateien müssen weder committet noch ignoriert werden.
+  Vor einem möglichen Fast-Forward-Pull vergleicht GitTool die lokalen Dateien
+  mit den eingehenden Dateipfaden, zeigt die vollständige Änderungsliste und
+  fragt ausdrücklich nach einer Freigabe. Überschneidungen sperren den Pull;
+  ohne Freigabe geschieht nichts. Git prüft zusätzlich auf Überschreibungen.
+  Kein implizites Stash, Reset, Rebase oder erzwungener Merge.
+- Getrennte Statusmeldungen **„Lokal geändert · Aktuell“**,
+  **„Lokal geändert · Pull möglich“** und **„Lokal geändert · Lokal voraus“**;
+  korrektes Diagnoseergebnis **„Tracking-Ref fehlt“** bei konfiguriertem,
+  aber nicht auflösbarem Upstream.
+- **Schneller Start:** gespeicherte Repositories werden in einem Durchgang
+  geladen, initialisierte Submodule erst danach im Hintergrund zugeordnet.
+  Ordnerscans fügen gefundene Repositories gesammelt hinzu.
 - Gespeicherte Repository-Pfade werden aus der vorherigen Tkinter-Version
   unverändert übernommen.
 
@@ -36,10 +49,25 @@ Qt-Version: `gittool/assets/gittool.png`. Es ist als Python-Paketressource
 enthalten und wird beim Start in den GTK-Icon-Suchpfad aufgenommen sowie als
 Fenster-Icon (`gittool`) gesetzt, unabhängig vom Arbeitsverzeichnis.
 
-Auf Wayland-/GNOME-Desktops kann für die korrekte Darstellung im
-Anwendungsmenü zusätzlich ein installierter Desktop-Eintrag mit
-`Icon=gittool` und einer passenden Datei im Hicolor-Icon-Thema erforderlich
-sein. Der Qt-Windows-Build verwendet denselben Bildentwurf für seine EXE.
+Für das Linux-Anwendungsmenü kann der mitgelieferte Desktopstarter
+inklusive des **neuen** Icons benutzerspezifisch installiert werden
+(kein Root erforderlich):
+
+~~~bash
+python scripts/install_linux_desktop.py
+~~~
+
+Das Skript verwendet den aktuell aktiven Python-Interpreter (auch aus einer
+virtuellen Umgebung) und legt den Starter in
+`~/.local/share/applications/io.github.protarios.gittool.desktop`
+sowie das Icon im XDG-Hicolor-Verzeichnis ab. Entfernen:
+
+~~~bash
+python scripts/install_linux_desktop.py --uninstall
+~~~
+
+Die Qt-Version im Branch `windows` verwendet dasselbe neue Motiv für die
+Windows-EXE, das Qt-Fenster und die Taskleiste.
 
 ## Reihenfolge und Submodule
 
@@ -50,9 +78,10 @@ nimmt dabei alle untergeordneten Submodule mit. Das Verschieben erfolgt
 auch bei einem Neustart in derselben Reihenfolge.
 
 Beim **Hinzufügen** eines Repositories (auch über die Ordnersuche) und
-beim **Laden der gespeicherten Liste** erkennt GitTool die *initialisierten*
-Git-Submodule über die Gitlinks des Git-Index, rekursiv einschließlich
-verschachtelter Submodule. Diese erhalten einen expliziten Parent und
+beim **Laden der gespeicherten Liste** erkennt GitTool *im Hintergrund* die
+initialisierten Git-Submodule über die Gitlinks des Git-Index, rekursiv
+einschließlich verschachtelter Submodule. Die Oberfläche wartet nicht auf
+diese Git-Prozesse. Diese erhalten einen expliziten Parent und
 werden unter dem jeweiligen Hauptrepository angezeigt.
 Submodule mit noch nicht ausgechecktem Worktree werden **nicht** automatisch
 geklont oder initialisiert; dazu muss zunächst manuell
@@ -148,16 +177,21 @@ Die direkte Startform `python -m gittool` funktioniert ebenfalls.
 2. **Alle prüfen** ruft bei jedem Repository `git fetch` auf und zeigt
    an, ob Remote-Commits vorliegen (↑ Ahead / ↓ Behind).
 3. **Alle prüfen + Pull** versucht ausschließlich sichere Fast-Forwards.
+   Bei lokalen Änderungen erscheint eine Liste mit allen geänderten und
+   unversionierten Dateien. Wenn keine dieser Dateien durch den Pull berührt
+   würde, kann der Pull bestätigt oder übersprungen werden.
 4. Die Auswahlkästchen erlauben Aktionen auf einzelne Repositories.
    Die Suchzeile filtert die Ansicht, nicht die gespeicherte Repository-Liste.
 5. Das Protokoll zeigt Erfolge, übersprungene Repositories und Fehler.
 
 Die automatische Aktualisierung führt **kein** `reset`, `stash`,
-`push` und keinen selbstständigen Branch-Wechsel aus. Der eigentliche
-Pull erfolgt mit
-`gittyup.git_operations.pull_repository_detailed()`. GitTool erzwingt
-`pull.ff=only` temporär für diesen Git-Prozess, nicht in der
-Git-Konfiguration des Repositories. Git-Hooks und Git-LFS-Filter können
+`push` und keinen selbstständigen Branch-Wechsel aus. Für unveränderte Arbeitsverzeichnisse läuft der eigentliche Pull über
+`gittyup.git_operations.pull_repository_detailed()` und GitTool erzwingt
+`pull.ff=only` temporär im Git-Prozess. Bei ausdrücklich freigegebenen
+lokalen Änderungen verwendet GitTool nach erneuter Prüfung
+`git merge --ff-only <geprüfter Commit>` ohne einen weiteren Netzwerk-Fetch.
+Damit bleibt der bestätigte Ziel-Commit festgelegt; die Git-Konfiguration
+des Repositories wird nicht dauerhaft verändert. Git-Hooks und Git-LFS-Filter können
 wie bei einem normalen `git pull` trotzdem ausgeführt werden.
 
 Die Repository-Liste enthält **keine Zugangsdaten**, sondern nur Pfade.
