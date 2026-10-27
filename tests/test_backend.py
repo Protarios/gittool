@@ -82,7 +82,7 @@ if importlib.util.find_spec("gittyup") is None:
 
 from gittool.backend import (  # noqa: E402
     GitToolError, discover_repositories, inspect_repository,
-    normalize_repository, pull_repository,
+    normalize_repository, prepare_pull, pull_repository,
 )
 from gittool.config import load_repositories, save_repositories  # noqa: E402
 
@@ -144,6 +144,94 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual(state.status, "Divergiert")
         self.assertFalse(state.can_pull)
         self.assertEqual(pull_repository(self.clone).action, "Übersprungen")
+
+    def test_untracked_latex_pdfs_survive_approved_fast_forward(self) -> None:
+        self.make_remote_commit()
+        pdf = self.clone / "Script-Beamer" / "Vorlesung_student_de.pdf"
+        pdf.parent.mkdir()
+        pdf.write_bytes(b"%PDF-1.4 generated, keep locally")
+        macro = self.clone / "Script-Beamer" / "Texstudio Makros.txsMacro"
+        macro.write_text("not committed")
+        preview = prepare_pull(self.clone)
+        self.assertTrue(preview.needs_confirmation)
+        self.assertTrue(preview.safe_to_continue)
+        self.assertEqual(len(preview.changes), 2)
+        self.assertFalse(preview.overlaps)
+        self.assertEqual(pull_repository(self.clone).action, "Übersprungen")
+        outcome = pull_repository(self.clone, approved_preview=preview)
+        self.assertEqual(outcome.action, "Aktualisiert")
+        self.assertEqual(outcome.state.behind, 0)
+        self.assertTrue(outcome.state.dirty)
+        self.assertEqual(pdf.read_bytes(), b"%PDF-1.4 generated, keep locally")
+        self.assertEqual(macro.read_text(), "not committed")
+        self.assertIn("remote", (self.clone / "example.txt").read_text())
+
+    def test_unrelated_tracked_changes_survive_fast_forward(self) -> None:
+        # Both local modification and staged modification are in a file the
+        # incoming commit does not touch.
+        (self.seed / "notes.tex").write_text("first")
+        git(self.seed, "add", ".")
+        git(self.seed, "commit", "-m", "add notes")
+        git(self.seed, "push")
+        git(self.clone, "pull", "--ff-only")
+        (self.clone / "notes.tex").write_text("locally edited")
+        self.make_remote_commit()
+        preview = prepare_pull(self.clone)
+        self.assertTrue(preview.safe_to_continue)
+        self.assertIn("notes.tex", [change.path for change in preview.changes])
+        result = pull_repository(self.clone, approved_preview=preview)
+        self.assertEqual(result.action, "Aktualisiert")
+        self.assertEqual((self.clone / "notes.tex").read_text(), "locally edited")
+
+    def test_untracked_file_collision_blocks_pull_even_if_user_approves(self) -> None:
+        remote_file = self.seed / "Script-Beamer" / "Vorlesung_student_de.pdf"
+        remote_file.parent.mkdir()
+        remote_file.write_bytes(b"remote pdf")
+        git(self.seed, "add", ".")
+        git(self.seed, "commit", "-m", "commit pdf on remote")
+        git(self.seed, "push")
+        local_file = self.clone / "Script-Beamer" / "Vorlesung_student_de.pdf"
+        local_file.parent.mkdir()
+        local_file.write_bytes(b"personal generated pdf")
+        preview = prepare_pull(self.clone)
+        self.assertEqual(preview.overlaps, ("Script-Beamer/Vorlesung_student_de.pdf",))
+        self.assertFalse(preview.safe_to_continue)
+        with self.assertRaises(GitToolError):
+            pull_repository(self.clone, approved_preview=preview)
+        self.assertEqual(local_file.read_bytes(), b"personal generated pdf")
+        self.assertEqual(git(self.clone, "rev-parse", "HEAD"),
+                         preview.head_oid)
+
+    def test_tracked_overlap_blocks_pull(self) -> None:
+        (self.clone / "example.txt").write_text("locally modified")
+        self.make_remote_commit()
+        preview = prepare_pull(self.clone)
+        self.assertIn("example.txt", preview.overlaps)
+        self.assertFalse(preview.safe_to_continue)
+        with self.assertRaises(GitToolError):
+            pull_repository(self.clone, approved_preview=preview)
+        self.assertEqual((self.clone / "example.txt").read_text(), "locally modified")
+
+    def test_file_changes_after_confirmation_abort_before_merge(self) -> None:
+        self.make_remote_commit()
+        pdf = self.clone / "Vorlesung_student_de.pdf"
+        pdf.write_bytes(b"first")
+        preview = prepare_pull(self.clone)
+        self.assertTrue(preview.safe_to_continue)
+        (self.clone / "newfile.pdf").write_bytes(b"added after confirmation")
+        with self.assertRaisesRegex(GitToolError, "Dateiliste"):
+            pull_repository(self.clone, approved_preview=preview)
+        self.assertEqual(git(self.clone, "rev-parse", "HEAD"), preview.head_oid)
+
+    def test_branch_moved_since_confirmation_aborts(self) -> None:
+        self.make_remote_commit()
+        (self.clone / "Vorlesung_student_de.pdf").write_bytes(b"keep")
+        preview = prepare_pull(self.clone)
+        self.assertTrue(preview.safe_to_continue)
+        git(self.clone, "checkout", "-b", "another-branch")
+        with self.assertRaisesRegex(GitToolError, "Stand hat sich"):
+            pull_repository(self.clone, approved_preview=preview)
+        self.assertEqual(git(self.clone, "rev-parse", "HEAD"), preview.head_oid)
 
     def test_untracked_branch_and_detached_head(self) -> None:
         git(self.clone, "checkout", "-b", "local-only")
