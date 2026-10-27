@@ -29,6 +29,7 @@ except ImportError as exc:
         "Bitte im aktiven Python-Environment 'python -m pip install -e .' ausführen."
     ) from exc
 
+from .app_icon import application_icon
 from .backend import (
     GitToolError, PullOutcome, PullPreview, RepositoryState,
     discover_repositories, discover_submodules, inspect_repository,
@@ -92,6 +93,7 @@ class GitToolWindow(QMainWindow):
         self.total = 0
         self.buttons: list[QPushButton] = []
 
+        self.setWindowIcon(application_icon())
         self.setWindowTitle("GitTool – Repository-Status und Pull")
         self.resize(1270, 790)
         self.setMinimumSize(850, 540)
@@ -765,6 +767,7 @@ def main() -> int:
     if app is None:
         app = QApplication(sys.argv)
     app.setApplicationName("GitTool")
+    app.setWindowIcon(application_icon())
     app.setOrganizationName("Protarios")
     app.setStyle("Fusion")
     app.setStyleSheet(STYLE)
