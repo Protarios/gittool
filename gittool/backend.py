@@ -262,6 +262,101 @@ def inspect_repository(value: str | Path, *, fetch: bool = True) -> RepositorySt
     )
 
 
+
+@dataclass(frozen=True)
+class LocalChange:
+    """One changed path, preserving its Git status code for the review dialog."""
+    status: str
+    path: str
+
+
+@dataclass(frozen=True)
+class PullPreview:
+    """Immutable result of a fetch + fast-forward and local-path safety check."""
+    state: RepositoryState
+    changes: tuple[LocalChange, ...] = ()
+    overlaps: tuple[str, ...] = ()
+    head_oid: str = ""
+    target_oid: str = ""
+
+    @property
+    def needs_confirmation(self) -> bool:
+        return bool(
+            self.state.dirty and self.state.ahead == 0
+            and self.state.behind > 0 and self.state.upstream
+            and self.head_oid and self.target_oid
+        )
+
+    @property
+    def safe_to_continue(self) -> bool:
+        return self.needs_confirmation and not self.overlaps
+
+
+def _local_changes(path: Path) -> tuple[LocalChange, ...]:
+    """Parse -z porcelain to avoid quoted path ambiguities and list ALL PDFs."""
+    result = _git(
+        path, "status", "--porcelain=v1", "-z",
+        "--untracked-files=all", "--ignore-submodules=none",
+    )
+    parts = result.stdout.split("\0")
+    changes: list[LocalChange] = []
+    index = 0
+    while index < len(parts):
+        entry = parts[index]
+        index += 1
+        if not entry:
+            continue
+        if len(entry) < 4 or entry[2] != " ":
+            raise GitToolError("Ungültige Dateiliste von git status.")
+        code = entry[:2]
+        name = entry[3:]
+        changes.append(LocalChange(code, name))
+        # Porcelain v1 -z puts the second pathname directly after a
+        # rename/copy entry (new path first, original path second).
+        if "R" in code or "C" in code:
+            if index >= len(parts) or not parts[index]:
+                raise GitToolError("Unvollständiger Git-Rename-/Copy-Eintrag.")
+            changes.append(LocalChange(code, parts[index]))
+            index += 1
+    return tuple(changes)
+
+
+def _path_overlap(left: str, right: str) -> bool:
+    """Conservatively catch identical paths and file/directory replacements."""
+    # Git tree paths always use '/' regardless of host OS.
+    a = os.path.normcase(left.replace("\\", "/")).rstrip("/")
+    b = os.path.normcase(right.replace("\\", "/")).rstrip("/")
+    return a == b or a.startswith(b + "/") or b.startswith(a + "/")
+
+
+def _incoming_changed_paths(path: Path) -> tuple[str, ...]:
+    """All tree paths changed by the incoming fast-forward, including deletions."""
+    result = _git(
+        path, "diff", "--name-only", "-z", "--no-renames",
+        "--ignore-submodules=none", "HEAD", "@{upstream}",
+    )
+    return tuple(p for p in result.stdout.split("\0") if p)
+
+
+def prepare_pull(value: str | Path) -> PullPreview:
+    """Fetch first, then provide a bounded, read-only local-change review."""
+    state = inspect_repository(value, fetch=True)
+    if not (state.dirty and state.ahead == 0 and state.behind > 0 and state.upstream):
+        return PullPreview(state)
+    changes = _local_changes(state.path)
+    if not changes:
+        raise GitToolError("Lokale Änderungen konnten nicht vollständig erfasst werden.")
+    incoming = _incoming_changed_paths(state.path)
+    overlaps = tuple(sorted({
+        change.path
+        for change in changes
+        if any(_path_overlap(change.path, modified) for modified in incoming)
+    }))
+    head = _git(state.path, "rev-parse", "HEAD").stdout.strip()
+    target = _git(state.path, "rev-parse", "@{upstream}").stdout.strip()
+    return PullPreview(state, changes, overlaps, head, target)
+
+
 @contextmanager
 def _fast_forward_only_environment() -> Iterator[None]:
     """Enforce ff-only when gittyup internally invokes plain 'git pull'.
@@ -294,22 +389,78 @@ def _fast_forward_only_environment() -> Iterator[None]:
                 os.environ[name] = value
 
 
-def pull_repository(value: str | Path) -> PullOutcome:
-    """Fetch, check safety preconditions, then pull through gittyup.
+def pull_repository(
+    value: str | Path, *, approved_preview: PullPreview | None = None,
+) -> PullOutcome:
+    """Fast-forward only; permit safe dirty trees with explicit prior approval.
 
-    Dirty, detached, nontracking, ahead and diverged repositories are skipped.
+    For approved dirty worktrees, merge the *already fetched exact commit*,
+    rather than running a second network fetch inside gittyup. The preflight
+    checks incoming changed paths and Git itself refuses local overwrites.
     """
     with _PULL_LOCK:
+        if approved_preview is not None:
+            if not approved_preview.safe_to_continue:
+                raise GitToolError("Ein Pull mit kollidierenden lokalen Änderungen ist gesperrt.")
+            path = normalize_repository(value)
+            if path != approved_preview.state.path:
+                raise GitToolError("Repository-Pfad hat sich seit der Freigabe geändert.")
+            # Reinspect immediately before updating (including status, refs).
+            before = inspect_repository(path, fetch=False)
+            if not (
+                before.dirty and before.ahead == 0 and before.behind > 0
+                and before.upstream == approved_preview.state.upstream
+                and before.branch == approved_preview.state.branch
+                and _git(path, "rev-parse", "HEAD").stdout.strip()
+                    == approved_preview.head_oid
+                and _git(path, "rev-parse", "@{upstream}").stdout.strip()
+                    == approved_preview.target_oid
+            ):
+                raise GitToolError(
+                    "Git-Stand hat sich seit der Bestätigung geändert. "
+                    "Bitte erneut prüfen und bestätigen."
+                )
+            current_changes = _local_changes(path)
+            if current_changes != approved_preview.changes:
+                raise GitToolError(
+                    "Lokale Dateiliste hat sich seit der Bestätigung geändert. "
+                    "Bitte erneut prüfen und bestätigen."
+                )
+            if any(
+                _path_overlap(change.path, incoming)
+                for change in current_changes
+                for incoming in _incoming_changed_paths(path)
+            ):
+                raise GitToolError("Dateiüberschneidung erkannt; Pull sicherheitshalber abgebrochen.")
+            # A fast-forward move to a pinned object is equivalent to fetch +
+            # ff-only pull, without a second fetch invalidating the preview.
+            # Git refuses to overwrite local changes even in unforeseen cases.
+            result = _git(
+                path, "merge", "--ff-only", approved_preview.target_oid,
+                timeout=NETWORK_TIMEOUT,
+            )
+            after = inspect_repository(path, fetch=False)
+            return PullOutcome(
+                after, "Aktualisiert",
+                (result.stdout + result.stderr).strip()
+                or "Fast-forward erfolgreich; lokale Dateien unverändert.",
+            )
+
         before = inspect_repository(value, fetch=True)
         if not before.can_pull:
             action = "Aktuell" if before.status == "Aktuell" else "Übersprungen"
+            if before.dirty and before.behind > 0 and before.ahead == 0:
+                return PullOutcome(
+                    before, "Übersprungen",
+                    "Lokale Änderungen: Pull nur nach Prüfung und Bestätigung möglich.",
+                )
             return PullOutcome(before, action, before.detail)
 
-        # gittyup's public API parses pull output and commit/file statistics.
-        # Its default implementation calls plain 'git pull', therefore force
-        # ff-only in the child Git process rather than altering local config.
+        # Keep clean worktrees on gittyup's existing, proven ff-only path.
         with _fast_forward_only_environment():
-            result = git_operations.pull_repository_detailed(before.path, timeout=NETWORK_TIMEOUT)
+            result = git_operations.pull_repository_detailed(
+                before.path, timeout=NETWORK_TIMEOUT,
+            )
 
         if not result.success:
             detail = result.error_details or result.error_message or "Unbekannter Pull-Fehler"
