@@ -15,6 +15,11 @@ from typing import Iterator
 
 from gittyup import git_operations, scanner
 
+from .git_process import configure_gittyup, run_git
+
+# Install per-Git-process console suppression before any Gittyup status/pull.
+configure_gittyup()
+
 
 LOCAL_TIMEOUT = 20
 NETWORK_TIMEOUT = 120
@@ -53,7 +58,7 @@ def _git(path: Path, *args: str, timeout: int = LOCAL_TIMEOUT, check: bool = Tru
     """Run a Git command without an interactive terminal prompt."""
     env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
     try:
-        result = subprocess.run(
+        result = run_git(
             ["git", *args],
             cwd=path,
             capture_output=True,
