@@ -147,10 +147,20 @@ python -m PyInstaller --noconfirm --clean --windowed --onedir --name GitTool --p
 ~~~
 
 GitTool enthält Qt/Python, **nicht Git für Windows**. Auf Zielrechnern
-muss `git.exe` weiterhin über den `PATH` erreichbar sein. Die GUI
-selbst öffnet kein Terminalfenster; Git-Subprozesse aus externen
-Bibliotheken können unabhängig davon unter Windows noch kurz
-Konsolenfenster erzeugen.
+muss `git.exe` weiterhin über den `PATH` erreichbar sein.
+
+**Keine aufblinkenden Terminalfenster:** Zusätzlich zum PyInstaller-Schalter
+`--windowed` startet GitTool alle eigenen synchronen Git-Unterprozesse
+unter Windows mit `subprocess.CREATE_NO_WINDOW`. Das gilt auch für
+Gittyups synchronen Git-Prozessstarter, der für die Statusprüfung und
+das Pull verwendet wird. Dadurch sind beim Start (automatische
+Submodule-Erkennung) und bei regulären Git-Aktionen keine zusätzlichen
+Konsolenfenster der Git-Prozesse sichtbar; die Protokollausgaben und
+Fehlertexte bleiben erhalten.
+
+Hinweis: Extern gestartete Credential-Manager oder Git-Hooks können
+eigenständige Benutzeroberflächen besitzen; diese werden nicht
+pauschal unterdrückt.
 
 Der GitHub-Actions-Workflow
 [Windows EXE (PyInstaller)](https://github.com/Protarios/gittool/actions/workflows/build-windows-exe.yml)
