@@ -6,6 +6,7 @@ The model deliberately never initializes, fetches or modifies a submodule.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 import os
 from pathlib import Path
 from typing import Iterable
@@ -17,16 +18,32 @@ class RepositoryEntry:
     parent: Path | None = None
 
 
+@lru_cache(maxsize=32768)
 def path_key(path: Path) -> str:
     return os.path.normcase(str(path.expanduser().resolve()))
 
 
 class RepositoryCatalog:
     def __init__(self, entries: Iterable[RepositoryEntry] = ()) -> None:
+        # Load in one pass instead of rebuilding the entire ordered tree for
+        # every entry. A large saved repository list otherwise becomes O(n^3).
         self.entries: list[RepositoryEntry] = []
+        seen: set[str] = set()
         for entry in entries:
-            # Orphaned parent paths become roots, never silently discard entries.
-            self.add(entry.path, entry.parent if entry.parent and self.has(entry.parent) else None)
+            path = Path(entry.path).expanduser().resolve()
+            key = path_key(path)
+            if key in seen:
+                continue
+            parent = (
+                Path(entry.parent).expanduser().resolve()
+                if entry.parent is not None else None
+            )
+            if parent is not None and path_key(parent) not in seen:
+                parent = None  # Preserve orphaned entries as roots.
+            self.entries.append(RepositoryEntry(path, parent))
+            seen.add(key)
+        if self.entries:
+            self._rebuild(self._ordered_groups())
 
     def has(self, path: Path) -> bool:
         return any(path_key(entry.path) == path_key(path) for entry in self.entries)
