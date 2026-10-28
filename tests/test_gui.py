@@ -82,8 +82,10 @@ class QtGuiTests(unittest.TestCase):
                 self.window.tree.headerItem().text(column)
             ) + 22
             self.assertEqual(self.window.tree.columnWidth(column), expected)
+        # Dateien / Ahead / Behind / Status retain their established widths.
+        self.assertEqual(self.window.tree.columnWidth(3), 74)
         self.assertEqual(self.window.tree.columnWidth(6), 175)
-        self.assertGreater(self.window.tree.columnWidth(7), 200)
+        self.assertEqual(self.window.tree.columnWidth(7), 300)
         self.assertEqual(self.window.tree.horizontalScrollBar().maximum(), 0)
 
         long_path = self.path / ("very-long-repository-name-" * 8)
