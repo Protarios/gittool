@@ -65,7 +65,7 @@ class QtGuiTests(unittest.TestCase):
         self.assertFalse(self.window.windowIcon().isNull())
 
     def test_compact_columns_do_not_scroll_horizontally_on_start(self) -> None:
-        """Numeric headings fit while the local path expands into free space."""
+        """Path uses spare width initially, but its separator remains draggable."""
         from PySide6.QtWidgets import QHeaderView
 
         self.window.resize(1270, 790)
@@ -73,8 +73,9 @@ class QtGuiTests(unittest.TestCase):
         QApplication.processEvents()
 
         header = self.window.tree.header()
+        self.assertFalse(header.stretchLastSection())
         self.assertEqual(
-            header.sectionResizeMode(7), QHeaderView.ResizeMode.Stretch,
+            header.sectionResizeMode(7), QHeaderView.ResizeMode.Interactive,
         )
         for column in (4, 5):
             expected = header.fontMetrics().horizontalAdvance(
@@ -88,6 +89,16 @@ class QtGuiTests(unittest.TestCase):
         self.window._register_repository(long_path, persist=False, discover=False)
         QApplication.processEvents()
         self.assertEqual(self.window.tree.horizontalScrollBar().maximum(), 0)
+
+        # Emulate the user dragging the "Lokaler Pfad" header handle right:
+        # the widened column must persist and produce a horizontal scrollbar.
+        widened = self.window.tree.columnWidth(7) + 450
+        header.resizeSection(7, widened)
+        QApplication.processEvents()
+        self.assertEqual(self.window.tree.columnWidth(7), widened)
+        self.assertGreater(self.window.tree.horizontalScrollBar().maximum(), 0)
+        QApplication.processEvents()
+        self.assertEqual(self.window.tree.columnWidth(7), widened)
 
     def test_add_and_scan_buttons_work_again_after_repeated_operations(self) -> None:
         """Regression: generic action buttons must not stay disabled after work."""
