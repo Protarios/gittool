@@ -254,22 +254,29 @@ class GitToolWindow(QMainWindow):
             QTimer.singleShot(0, self._fit_initial_path_width)
 
     def _fit_initial_path_width(self) -> None:
-        """Choose a compact startup path width; keep the header draggable."""
+        """Fill the table at startup without stretching the path or locking handles."""
         if self._initial_path_width_set or not self.isVisible():
             return
         header = self.tree.header()
-        available = self.tree.viewport().width() - sum(
-            header.sectionSize(column) for column in range(PATH_COLUMN)
-        ) - 2
-        min_width = max(
+        viewport_width = self.tree.viewport().width() - 3
+        other_widths = sum(header.sectionSize(column) for column in range(PATH_COLUMN))
+        min_path = max(
             header.minimumSectionSize(),
             header.fontMetrics().horizontalAdvance(COLUMNS[PATH_COLUMN]) + 22,
         )
-        # Avoid letting this column fill the entire remaining window.
-        # Keep the initial appearance compact; the user can still drag the
-        # separator wider and obtain the horizontal scrollbar when needed.
-        initial_width = min(300, available)
-        self.tree.setColumnWidth(PATH_COLUMN, max(min_width, initial_width))
+        # Keep the local path compact; distribute the remaining window width
+        # between the useful descriptive columns instead of leaving a blank
+        # area to the right. Numeric, files and status widths stay unchanged.
+        path_width = max(min_path, min(300, viewport_width - other_widths))
+        self.tree.setColumnWidth(PATH_COLUMN, path_width)
+        extra = max(0, viewport_width - other_widths - path_width)
+        repo_extra = extra * 4 // 10
+        branch_extra = extra * 25 // 100
+        self.tree.setColumnWidth(0, header.sectionSize(0) + repo_extra)
+        self.tree.setColumnWidth(1, header.sectionSize(1) + branch_extra)
+        self.tree.setColumnWidth(2, header.sectionSize(2) + extra - repo_extra - branch_extra)
+        # All header sections remain Interactive, so the user can change any
+        # width later and the horizontal scrollbar appears when needed.
         self._initial_path_width_set = True
 
     def _register_repository(
