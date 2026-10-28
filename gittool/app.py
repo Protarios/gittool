@@ -202,10 +202,19 @@ class GitToolWindow(QMainWindow):
         self.tree.setMinimumHeight(180)
         self.tree.setAllColumnsShowFocus(True)
         header = self.tree.header()
-        header.setStretchLastSection(True)
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        for col, width in enumerate((165, 145, 175, 85, 80, 80, 175, 380)):
+        # Keep numeric columns just wide enough for their headings. A fixed
+        # 80 px width for both wasted space, while the former column defaults
+        # forced horizontal scrolling at normal window sizes.
+        numeric_width = lambda column: header.fontMetrics().horizontalAdvance(
+            COLUMNS[column]
+        ) + 22  # text padding and section grip
+        widths = (150, 100, 155, 74, numeric_width(4), numeric_width(5), 190)
+        for col, width in enumerate(widths):
             self.tree.setColumnWidth(col, width)
+        # The path is naturally the longest field: give it all remaining
+        # width rather than demanding a fixed 380 px from the outset.
+        header.setSectionResizeMode(PATH_COLUMN, QHeaderView.ResizeMode.Stretch)
         self.tree.itemSelectionChanged.connect(self._refresh_buttons)
         splitter.addWidget(self.tree)
 
