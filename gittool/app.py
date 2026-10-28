@@ -92,6 +92,7 @@ class GitToolWindow(QMainWindow):
         self.completed = 0
         self.total = 0
         self.buttons: list[QPushButton] = []
+        self._initial_path_width_set = False
 
         self.setWindowIcon(application_icon())
         self.setWindowTitle("GitTool – Repository-Status und Pull")
@@ -202,19 +203,19 @@ class GitToolWindow(QMainWindow):
         self.tree.setMinimumHeight(180)
         self.tree.setAllColumnsShowFocus(True)
         header = self.tree.header()
+        # All columns, including the path, must stay manually resizable.
+        # StretchLastSection / ResizeMode.Stretch suppress the draggable handle.
+        header.setStretchLastSection(False)
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        # Keep numeric columns just wide enough for their headings. A fixed
-        # 80 px width for both wasted space, while the former column defaults
-        # forced horizontal scrolling at normal window sizes.
         numeric_width = lambda column: header.fontMetrics().horizontalAdvance(
             COLUMNS[column]
-        ) + 22  # text padding and section grip
+        ) + 22  # heading padding and section grip
         widths = (150, 100, 155, 74, numeric_width(4), numeric_width(5), 190)
         for col, width in enumerate(widths):
             self.tree.setColumnWidth(col, width)
-        # The path is naturally the longest field: give it all remaining
-        # width rather than demanding a fixed 380 px from the outset.
-        header.setSectionResizeMode(PATH_COLUMN, QHeaderView.ResizeMode.Stretch)
+        # Fit the path column to the actual viewport once the window is shown,
+        # without imposing a fixed minimum or disabling manual enlargement.
+        self.tree.setColumnWidth(PATH_COLUMN, 250)
         self.tree.itemSelectionChanged.connect(self._refresh_buttons)
         splitter.addWidget(self.tree)
 
@@ -245,6 +246,27 @@ class GitToolWindow(QMainWindow):
         layout.addLayout(footer)
         self.statusBar().showMessage("Mehrfachauswahl mit Strg oder Umschalt. Kein Merge und kein Rebase.")
         self._refresh_buttons()
+
+    def showEvent(self, event: object) -> None:
+        super().showEvent(event)
+        if not self._initial_path_width_set:
+            # Layout/scrollbar geometry is not reliable before the first show.
+            QTimer.singleShot(0, self._fit_initial_path_width)
+
+    def _fit_initial_path_width(self) -> None:
+        """Use spare viewport space at startup; keep the header draggable."""
+        if self._initial_path_width_set or not self.isVisible():
+            return
+        header = self.tree.header()
+        available = self.tree.viewport().width() - sum(
+            header.sectionSize(column) for column in range(PATH_COLUMN)
+        ) - 2
+        min_width = max(
+            header.minimumSectionSize(),
+            header.fontMetrics().horizontalAdvance(COLUMNS[PATH_COLUMN]) + 22,
+        )
+        self.tree.setColumnWidth(PATH_COLUMN, max(min_width, available))
+        self._initial_path_width_set = True
 
     def _register_repository(
         self, path: Path, *, parent: Path | None = None,
