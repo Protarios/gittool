@@ -254,7 +254,7 @@ class GitToolWindow(QMainWindow):
             QTimer.singleShot(0, self._fit_initial_path_width)
 
     def _fit_initial_path_width(self) -> None:
-        """Use spare viewport space at startup; keep the header draggable."""
+        """Choose a compact startup path width; keep the header draggable."""
         if self._initial_path_width_set or not self.isVisible():
             return
         header = self.tree.header()
@@ -265,7 +265,11 @@ class GitToolWindow(QMainWindow):
             header.minimumSectionSize(),
             header.fontMetrics().horizontalAdvance(COLUMNS[PATH_COLUMN]) + 22,
         )
-        self.tree.setColumnWidth(PATH_COLUMN, max(min_width, available))
+        # Avoid letting this column fill the entire remaining window.
+        # Keep the initial appearance compact; the user can still drag the
+        # separator wider and obtain the horizontal scrollbar when needed.
+        initial_width = min(300, available)
+        self.tree.setColumnWidth(PATH_COLUMN, max(min_width, initial_width))
         self._initial_path_width_set = True
 
     def _register_repository(
