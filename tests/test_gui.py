@@ -64,6 +64,31 @@ class QtGuiTests(unittest.TestCase):
         self.assertFalse(application_icon().isNull())
         self.assertFalse(self.window.windowIcon().isNull())
 
+    def test_compact_columns_do_not_scroll_horizontally_on_start(self) -> None:
+        """Numeric headings fit while the local path expands into free space."""
+        from PySide6.QtWidgets import QHeaderView
+
+        self.window.resize(1270, 790)
+        self.window.show()
+        QApplication.processEvents()
+
+        header = self.window.tree.header()
+        self.assertEqual(
+            header.sectionResizeMode(7), QHeaderView.ResizeMode.Stretch,
+        )
+        for column in (4, 5):
+            expected = header.fontMetrics().horizontalAdvance(
+                self.window.tree.headerItem().text(column)
+            ) + 22
+            self.assertEqual(self.window.tree.columnWidth(column), expected)
+        self.assertGreater(self.window.tree.columnWidth(7), 200)
+        self.assertEqual(self.window.tree.horizontalScrollBar().maximum(), 0)
+
+        long_path = self.path / ("very-long-repository-name-" * 8)
+        self.window._register_repository(long_path, persist=False, discover=False)
+        QApplication.processEvents()
+        self.assertEqual(self.window.tree.horizontalScrollBar().maximum(), 0)
+
     def test_add_and_scan_buttons_work_again_after_repeated_operations(self) -> None:
         """Regression: generic action buttons must not stay disabled after work."""
         by_label = {button.text(): button for button in self.window.buttons}
