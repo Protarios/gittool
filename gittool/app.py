@@ -210,7 +210,7 @@ class GitToolWindow(QMainWindow):
         numeric_width = lambda column: header.fontMetrics().horizontalAdvance(
             COLUMNS[column]
         ) + 22  # heading padding and section grip
-        widths = (150, 100, 155, 74, numeric_width(4), numeric_width(5), 190)
+        widths = (150, 100, 155, 74, numeric_width(4), numeric_width(5), 175)
         for col, width in enumerate(widths):
             self.tree.setColumnWidth(col, width)
         # Fit the path column to the actual viewport once the window is shown,
