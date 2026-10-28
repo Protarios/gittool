@@ -35,15 +35,20 @@ jobs:
           python -m pip install --upgrade pyinstaller
       - name: Create Linux AppImage
         run: bash scripts/build_appimage.sh
+      - name: Inspect bundled Qt xcb plugin dependencies
+        if: github.ref_name == 'windows'
+        run: |
+          find dist/GitTool -name 'libqxcb.so' -print -exec ldd {} \;
+          find dist/GitTool -name 'libQt6XcbQpa.so*' -print -exec ldd {} \;
       - name: Smoke test AppImage with a virtual display
         shell: bash
         run: |
           set +e
-          APPIMAGE_EXTRACT_AND_RUN=1 timeout 15s xvfb-run -a \
+          QT_DEBUG_PLUGINS=1 APPIMAGE_EXTRACT_AND_RUN=1 timeout 15s xvfb-run -a \
             dist/GitTool-*-x86_64.AppImage > build/smoke.log 2>&1
           code=$?
           set -e
-          cat build/smoke.log
+          tail -n 180 build/smoke.log
           if [ "$code" -ne 124 ]; then
             echo "GitTool AppImage exited before timeout: $code"
             exit 1
