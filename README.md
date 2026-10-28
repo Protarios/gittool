@@ -95,6 +95,36 @@ Dateien älterer Version 1 werden ohne Verlust der Reihenfolge übernommen.
 **Entfernen** eines Hauptrepositories löscht auch die zugehörigen Submodule
 aus der *Liste*, niemals von der Festplatte.
 
+## Linux-AppImage (x86_64)
+
+Aus dem jeweiligen Branch erzeugt GitHub Actions eine eigene Linux-AppImage
+mit dem neuen GitTool-Icon:
+
+- `windows`: Qt6/PySide6, Ausgabe `GitTool-Qt-x86_64.AppImage`.
+- `gpt`: GTK4/libadwaita, Ausgabe `GitTool-GTK-x86_64.AppImage`.
+
+Den Build findest du unter
+[GitHub Actions · Linux AppImage](https://github.com/Protarios/gittool/actions/workflows/build-appimage.yml).
+Auf den gewünschten Branch achten und unter **Artifacts** das zugehörige
+`GitTool-Linux-AppImage-windows` bzw. `GitTool-Linux-AppImage-gpt` laden.
+
+Nach dem Entpacken des Actions-Artifacts:
+
+~~~bash
+chmod +x GitTool-*-x86_64.AppImage
+./GitTool-*-x86_64.AppImage
+~~~
+
+Die AppImage benötigt keine separate Python-Umgebung, aber **Git** muss auf
+dem Zielrechner installiert und über `PATH` verfügbar sein. Beide Varianten
+werden auf Ubuntu 24.04 gebaut, weshalb der Einsatz auf deutlich älteren
+Linux-Distributionen nicht garantiert ist. Der Workflow führt nach jedem
+Build einen echten Starttest über einen virtuellen X11-Bildschirm aus.
+
+Wenn das System keine FUSE-Unterstützung für AppImage bereitstellt, kann
+`APPIMAGE_EXTRACT_AND_RUN=1 ./GitTool-*-x86_64.AppImage` verwendet werden.
+Der eigene lokale Entwicklungsstart über `python -m gittool` bleibt unverändert.
+
 ## Installation unter Linux
 
 Voraussetzungen: **Python 3.13+**, Git, GTK **4.10+**, libadwaita und
