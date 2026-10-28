@@ -86,6 +86,21 @@ class QtGuiTests(unittest.TestCase):
         self.assertEqual(self.window.tree.columnWidth(3), 74)
         self.assertEqual(self.window.tree.columnWidth(6), 175)
         self.assertEqual(self.window.tree.columnWidth(7), 300)
+        for col, old_width in ((0, 150), (1, 100), (2, 155)):
+            self.assertEqual(
+                header.sectionResizeMode(col), QHeaderView.ResizeMode.Interactive,
+            )
+            self.assertGreater(
+                self.window.tree.columnWidth(col), old_width,
+                f"Descriptive column {col} should absorb spare width",
+            )
+        used_width = sum(
+            self.window.tree.columnWidth(column)
+            for column in range(self.window.tree.columnCount())
+        )
+        spare_width = self.window.tree.viewport().width() - used_width
+        self.assertGreaterEqual(spare_width, 0)
+        self.assertLessEqual(spare_width, 8)
         self.assertEqual(self.window.tree.horizontalScrollBar().maximum(), 0)
 
         long_path = self.path / ("very-long-repository-name-" * 8)
