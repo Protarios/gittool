@@ -82,6 +82,7 @@ class QtGuiTests(unittest.TestCase):
                 self.window.tree.headerItem().text(column)
             ) + 22
             self.assertEqual(self.window.tree.columnWidth(column), expected)
+        self.assertEqual(self.window.tree.columnWidth(6), 175)
         self.assertGreater(self.window.tree.columnWidth(7), 200)
         self.assertEqual(self.window.tree.horizontalScrollBar().maximum(), 0)
 
